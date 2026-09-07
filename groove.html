@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r11-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r12-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -2686,7 +2686,7 @@ var GT = (function () {
         google.script.run
           .withSuccessHandler(function (res) { toast(res && res.ok ? ('已存到 Drive：' + name) : ('存檔失敗：' + ((res && res.error) || '?')), res && res.ok); })
           .withFailureHandler(function (e) { toast('存檔失敗：' + e.message, false); })
-          .saveToDrive(name, b64, mime || 'application/octet-stream');
+          .saveToDrive(name, b64, mime || 'application/octet-stream', ($('gtId').value || '').trim());
       });
       return;
     }
@@ -2698,7 +2698,7 @@ var GT = (function () {
     if (CLOUD_URL) {                                  // 靜態雲端模式：下載之外，同一份也存進共用 Drive
       toast('已下載，同步存到雲端中… ' + name);
       toB64(text, function (b64) {
-        cloudPost({ action: 'save', name: name, b64: b64, mime: mime || 'application/octet-stream' }, function (res) {
+        cloudPost({ action: 'save', name: name, b64: b64, mime: mime || 'application/octet-stream', sub: ($('gtId').value || '').trim() }, function (res) {
           toast(res.ok ? (res.unverified ? '已送到雲端：' + name : '已存到 Drive：' + name) : ('雲端存檔失敗：' + (res.error || '?')), res.ok);
         });
       });
@@ -3052,11 +3052,7 @@ var GT = (function () {
   }
 
   function exportPNG() {
-    $('gtCv').toBlob(function (b) {
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(b); a.download = fname('png'); a.click();
-      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
-    }, 'image/png');
+    $('gtCv').toBlob(function (b) { download(fname('png'), b, 'image/png'); }, 'image/png');
   }
 
   // ── 設定檔：存／讀所有參數（不含木片編號與照片）──
@@ -3065,7 +3061,7 @@ var GT = (function () {
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
     'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r11-0907', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r12-0907', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3144,7 +3140,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r11-0907', note: ($('gtRecNote').value || '').trim()
+      ver: 'r12-0907', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
