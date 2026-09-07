@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>年輪身分證 · 同心石光</title>
+<style>
+  :root{
+    --bg:#0d0c0e; --bg2:#141317; --ink:#ece8df; --ink2:#a49c8c; --ink3:#6f685c;
+    --gold:#d9b25e; --gold2:#e9cf8f; --warm:#e0ce8c; --cool:#5c7878; --line:#2a2823;
+    --card:#17161a;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  body{overflow-x:hidden}
+  .wrap{max-width:860px;margin:0 auto;padding:0 20px}
+  .hd{text-align:center;padding:40px 20px 8px}
+  .hd .k{font-size:12px;letter-spacing:.08em;color:var(--gold);margin-bottom:10px}
+  .hd h1{font-size:30px;margin:0;font-weight:800}
+  .hd p{color:var(--ink2);font-size:14px;margin:12px auto 0;max-width:520px;line-height:1.8}
+
+  /* ── 入口：輸入 + 分枝格 ── */
+  #home{padding-bottom:60px}
+  .search{display:flex;gap:10px;max-width:420px;margin:26px auto 8px}
+  .search input{flex:1;background:var(--bg2);border:1px solid var(--line);color:var(--ink);
+    font-size:20px;text-align:center;letter-spacing:.15em;border-radius:14px;padding:16px;outline:none}
+  .search input:focus{border-color:var(--gold)}
+  .search button{background:var(--gold);color:#211a08;border:0;border-radius:14px;
+    font-size:17px;font-weight:800;padding:0 22px;cursor:pointer}
+  .hint{text-align:center;color:var(--ink3);font-size:13px;margin:6px 0 30px}
+  .branch{margin:22px 0}
+  .branch .bt{font-size:14px;color:var(--ink2);margin:0 4px 10px;font-weight:700;letter-spacing:.05em}
+  .grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+  .chip{background:var(--card);border:1px solid var(--line);border-radius:14px;
+    padding:16px 6px;text-align:center;cursor:pointer;transition:.15s;position:relative;overflow:hidden}
+  .chip:active{transform:scale(.96)}
+  .chip .cid{font-size:19px;font-weight:800;letter-spacing:.06em}
+  .chip .cdot{width:100%;height:4px;border-radius:3px;margin-top:9px}
+  @media(max-width:520px){.grid{gap:7px}.chip{padding:14px 4px;border-radius:12px}.chip .cid{font-size:17px}}
+
+  /* ── 詳細頁 ── */
+  #detail{display:none;padding-bottom:80px}
+  .back{display:inline-flex;align-items:center;gap:7px;background:none;border:0;color:var(--ink2);
+    font-size:15px;cursor:pointer;padding:22px 4px 12px;font-family:inherit}
+  .idcard{text-align:center;margin-top:6px}
+  .idcard .lbl{font-size:12px;letter-spacing:.08em;color:var(--gold)}
+  .idcard .big{font-size:46px;font-weight:800;letter-spacing:.05em;margin:4px 0 2px}
+  .idcard .sub{color:var(--ink2);font-size:14px}
+  .stage{position:relative;margin:16px auto 4px;width:100%;max-width:560px;aspect-ratio:1/1}
+  canvas{width:100%;height:100%;display:block;border-radius:20px;background:#050506}
+  .cap{text-align:center;color:var(--ink3);font-size:12.5px;margin:2px 0 24px;line-height:1.7}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:18px;
+    padding:22px 22px;margin:14px 0}
+  .card h3{margin:0 0 4px;font-size:15px;color:var(--gold2);font-weight:800;letter-spacing:.04em}
+  .card .lead{font-size:22px;font-weight:800;margin:8px 0 4px;line-height:1.35}
+  .card p{color:var(--ink2);font-size:14.5px;line-height:1.95;margin:8px 0 0}
+  .card p b{color:var(--ink)}
+
+  /* 相對年齡 spectrum */
+  .spec{position:relative;height:14px;border-radius:8px;margin:20px 2px 8px;
+    background:linear-gradient(90deg,#5c7878,#8a8a6a,#d9b25e)}
+  .spec .pin{position:absolute;top:50%;width:20px;height:20px;border-radius:50%;
+    background:var(--ink);border:3px solid var(--bg);transform:translate(-50%,-50%);
+    box-shadow:0 0 0 2px var(--gold)}
+  .specL{display:flex;justify-content:space-between;color:var(--ink3);font-size:12px;margin:0 2px}
+
+  /* 心材 gauge */
+  .gauge{display:flex;align-items:center;gap:20px;margin-top:14px}
+  .gauge .ring{position:relative;width:104px;height:104px;flex:0 0 auto}
+  .gauge .ring svg{transform:rotate(-90deg)}
+  .gauge .ring .num{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    font-size:25px;font-weight:800;color:var(--gold2)}
+  .gauge .gt{flex:1}
+
+  .tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .tag{background:var(--bg2);border:1px solid var(--line);border-radius:20px;
+    padding:7px 14px;font-size:13px;color:var(--ink2)}
+  .tag b{color:var(--gold2)}
+  .foot{text-align:center;color:var(--ink3);font-size:11.5px;line-height:1.9;margin:30px auto 0;max-width:560px}
+  .foot b{color:var(--ink2)}
+  .siteFoot{text-align:center;color:var(--ink3);font-size:11.5px;padding:24px 0 32px;border-top:1px solid var(--line);margin-top:10px}
+
+  /* 立柱規劃 */
+  .planEntry{display:block;margin:2px auto 26px;background:var(--bg2);border:1px solid var(--gold);
+    color:var(--gold2);border-radius:26px;padding:12px 24px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}
+  .planEntry:active{transform:scale(.97)}
+  #planner,#column{display:none;padding-bottom:80px}
+  .phint{text-align:center;color:var(--ink3);font-size:13px;margin:4px 0 18px}
+  .mychips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;min-height:44px;margin:0 0 22px}
+  .mychip{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:9px 8px 9px 16px;
+    display:flex;align-items:center;gap:10px;font-size:16px;font-weight:800}
+  .mychip .ca{width:10px;height:10px;border-radius:50%}
+  .mychip .cx{width:24px;height:24px;border-radius:50%;background:var(--bg2);border:0;color:var(--ink2);
+    font-size:15px;cursor:pointer;line-height:1;font-family:inherit}
+  .colBtn{display:block;width:100%;max-width:420px;margin:0 auto;background:var(--gold);color:#241c08;
+    border:0;border-radius:14px;padding:15px;font-size:16px;font-weight:800;cursor:pointer;font-family:inherit}
+  .colBtn:disabled{background:var(--card);color:var(--ink3);cursor:default}
+  .dirRow{text-align:center;margin:2px 0 18px}
+  .flip{background:var(--bg2);border:1px solid var(--line);color:var(--ink2);border-radius:22px;
+    padding:9px 18px;font-size:13.5px;cursor:pointer;font-family:inherit}
+  .pillar{max-width:440px;margin:0 auto;position:relative}
+  .pillar::before{content:"";position:absolute;left:50%;top:14px;bottom:14px;width:4px;margin-left:-2px;
+    background:linear-gradient(var(--ink3),var(--line));border-radius:2px;z-index:0}
+  .disc{position:relative;z-index:1;display:flex;align-items:center;gap:16px;padding:8px 0;cursor:pointer}
+  .disc canvas{width:96px;height:96px;flex:0 0 auto;border-radius:50%;background:#050506;
+    box-shadow:0 0 0 1px var(--line)}
+  .disc .info{flex:1;text-align:left}
+  .disc .di{font-size:22px;font-weight:800;letter-spacing:.03em}
+  .disc .dage{font-size:13.5px;color:var(--gold2);font-weight:700;margin-top:2px}
+  .disc .dbar{height:8px;border-radius:5px;background:var(--line);margin-top:8px;overflow:hidden;max-width:180px}
+  .disc .dbar>i{display:block;height:100%;background:linear-gradient(90deg,var(--cool),var(--gold))}
+  .disc .dend{font-size:11.5px;color:var(--ink3);margin-top:5px}
+  .modeRow{display:flex;align-items:center;justify-content:space-between;gap:10px;max-width:440px;margin:2px auto 18px}
+  .seg2{display:flex;gap:6px}
+  .seg2 button{background:var(--bg2);border:1px solid var(--line);color:var(--ink2);border-radius:9px;
+    padding:8px 14px;font-size:13px;cursor:pointer;font-family:inherit}
+  .seg2 button.on{background:var(--gold);color:#241c08;border-color:var(--gold);font-weight:700}
+  /* 亮燈模擬 */
+  .litStage{max-width:440px;margin:0 auto;background:radial-gradient(120% 90% at 50% 10%,#0c0c10,#050506);
+    border:1px solid var(--line);border-radius:16px;padding:26px 10px;display:flex;flex-direction:column;
+    align-items:center;gap:0}
+  .lslice{position:relative;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .lslice .glow{border-radius:50%}
+  .lslice .lt{position:absolute;left:calc(50% + 8px);white-space:nowrap;font-size:11px;color:var(--ink3);
+    transform:translateX(60px);font-variant-numeric:tabular-nums}
+  .litNote{max-width:440px;margin:12px auto 0;text-align:center;font-size:12px;color:var(--ink3);line-height:1.8}
+</style>
+</head>
+<body>
+
+<div id="home">
+  <div class="hd">
+    <div class="k">同心石光 · 楊梅故事園區</div>
+    <h1>年輪身分證</h1>
+    <p>這批木片，來自同一棵活了約百年的老樟樹。<br>輸入木片編號，看看它把多少歲月，藏進了自己的年輪裡。</p>
+  </div>
+  <div class="wrap">
+    <div class="search">
+      <input id="q" inputmode="text" placeholder="例如 3-1" autocomplete="off">
+      <button id="go">查詢</button>
+    </div>
+    <div class="hint" id="hint">或直接點下面的木片</div>
+    <button class="planEntry" id="toPlanner">拿到好幾片？　規劃我的立柱 ›</button>
+    <div id="branches"></div>
+  </div>
+</div>
+
+<div id="detail">
+  <div class="wrap">
+    <button class="back" id="back">‹ 回到全部木片</button>
+    <div class="idcard">
+      <div class="lbl">年輪身分證</div>
+      <div class="big" id="dId">—</div>
+      <div class="sub" id="dSub">—</div>
+    </div>
+    <div class="stage"><canvas id="cv" width="1120" height="1120"></canvas></div>
+    <div class="cap" id="dCap">這是這片木頭的「時間曼陀羅」——每一圈，都是它走過的一年。</div>
+
+    <div class="card">
+      <h3>它有多年長？</h3>
+      <div class="lead" id="ageLead">—</div>
+      <div class="spec"><div class="pin" id="agePin"></div></div>
+      <div class="specL"><span>年輕的木</span><span>年長的木</span></div>
+      <p id="ageBody">—</p>
+    </div>
+
+    <div class="card">
+      <h3>心材比例</h3>
+      <div class="gauge">
+        <div class="ring">
+          <svg width="104" height="104" viewBox="0 0 104 104">
+            <circle cx="52" cy="52" r="44" fill="none" stroke="#2a2823" stroke-width="12"/>
+            <circle id="gArc" cx="52" cy="52" r="44" fill="none" stroke="#d9b25e" stroke-width="12"
+                    stroke-linecap="round" stroke-dasharray="276" stroke-dashoffset="276"/>
+          </svg>
+          <div class="num" id="gNum">—</div>
+        </div>
+        <div class="gt">
+          <p id="heartBody" style="margin-top:0">—</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>它的生命故事</h3>
+      <p id="story">—</p>
+      <div class="tags" id="tags"></div>
+    </div>
+
+    <div class="foot">
+      <b>關於這些數字：</b>木片表面未經打磨，年輪不容易一條條數清楚，
+      所以這裡不標「幾歲」，而是用「心材比例」與彼此相對的位置，
+      讓大家感受這棵老樹身上、不同部位留下的時間痕跡。<br>
+      《同心石光》· 一棵樹的時間，交給大家一起看見。
+    </div>
+  </div>
+</div>
+
+<div id="planner">
+  <div class="wrap">
+    <button class="back" id="pBack">‹ 回首頁</button>
+    <div class="idcard">
+      <div class="lbl">規劃我的立柱</div>
+      <div class="big" style="font-size:28px">把你的木片，排成一根柱子</div>
+      <div class="sub">輸入你手上每一片的編號，我幫你依年紀排好，你再決定要怎麼串。</div>
+    </div>
+    <div class="search">
+      <input id="pq" inputmode="text" placeholder="輸入編號後按加入" autocomplete="off">
+      <button id="pAdd">加入</button>
+    </div>
+    <div class="phint" id="pHint">通常一位參與者拿 5–6 片</div>
+    <div id="myChips" class="mychips"></div>
+    <button class="colBtn" id="toColumn" disabled>看我的立柱（依年紀排好）</button>
+  </div>
+</div>
+
+<div id="column">
+  <div class="wrap">
+    <button class="back" id="cBack">‹ 改我的木片</button>
+    <div class="idcard">
+      <div class="lbl">我的立柱</div>
+      <div class="big" id="colTitle" style="font-size:30px">—</div>
+      <div class="sub" id="colSub">—</div>
+    </div>
+    <div class="modeRow">
+      <div class="seg2" id="colMode">
+        <button data-v="mandala" class="on">時間曼陀羅</button>
+        <button data-v="lit">亮燈模擬</button>
+      </div>
+      <button id="flipDir" class="flip">上下顛倒 ↕</button>
+    </div>
+    <div id="pillar" class="pillar"></div>
+    <div id="litStage" class="litStage" hidden></div>
+    <div class="cap" id="colCap">點任一片可看它完整的年輪身分證。這是依年紀排好的建議，最後怎麼串，由你決定。</div>
+  </div>
+</div>
+
+<div class="siteFoot">Copyright © 2026 CKfablab</div>
+
+<script src="data.js"></script>
+<script>
+(function(){
+  var $=function(id){return document.getElementById(id);};
+  var stops=[[236,206,140],[206,150,86],[92,120,120],[52,58,86]];
+
+  // ── 解碼 base64 → 極座標 2D ──
+  function decode(s){
+    var b=s.polar, bin=atob(b), n=bin.length, u=new Uint8Array(n);
+    for(var i=0;i<n;i++)u[i]=bin.charCodeAt(i);
+    var NA=s.NA,NR=s.NR,P=[];
+    for(var a=0;a<NA;a++){var row=new Float32Array(NR);for(var j=0;j<NR;j++)row[j]=u[a*NR+j];P.push(row);}
+    return {NA:NA,NR:NR,polar:P,wood:s.wood,w:s.w,h:s.ht,heart:s.h};
+  }
+  // ── 密度場（移植自時間膨脹壓縮引擎）──
+  function densityField(S){
+    var NA=S.NA,NR=S.NR,P=S.polar,freq=[],win=Math.max(3,Math.round(NR*0.06)),dwin=Math.max(4,Math.round(NR*0.05));
+    for(var a=0;a<NA;a++){var L=P[a],de=new Float32Array(NR);
+      for(var j=0;j<NR;j++){var s0=0,c0=0;for(var k=-win;k<=win;k++){var jj=j+k;if(jj>=0&&jj<NR){s0+=L[jj];c0++;}}de[j]=L[j]-s0/c0;}
+      var row=new Float32Array(NR);
+      for(var j2=0;j2<NR;j2++){var zc=0;for(var k2=-dwin;k2<dwin;k2++){var a1=j2+k2,a2=j2+k2+1;if(a1>=0&&a2<NR&&(de[a1]<0)!=(de[a2]<0))zc++;}row[j2]=zc;}
+      freq.push(row);}
+    function sm1(src){var out=[];for(var a3=0;a3<NA;a3++){var r2=new Float32Array(NR);
+      for(var j3=0;j3<NR;j3++){var s1=0,c1=0;for(var da=-4;da<=4;da++){var aa=(a3+da+NA)%NA;for(var dj=-3;dj<=3;dj++){var jj=j3+dj;if(jj>=0&&jj<NR){s1+=src[aa][jj];c1++;}}}r2[j3]=s1/c1;}out.push(r2);}return out;}
+    var sm=sm1(sm1(freq)),vals=[];
+    for(var av=0;av<NA;av++)for(var jv=0;jv<NR;jv++)vals.push(sm[av][jv]);
+    vals.sort(function(x,y){return x-y;});
+    return {f:sm,lo:vals[(vals.length*0.1)|0],hi:vals[(vals.length*0.9)|0],
+            mid:vals[(vals.length*0.5)|0],NA:NA,NR:NR};
+  }
+  function col(t){t=Math.max(0,Math.min(1,t));var seg=t*3,i=Math.min(2,seg|0),f=seg-i,a=stops[i],b=stops[i+1];
+    return [Math.round(a[0]+(b[0]-a[0])*f),Math.round(a[1]+(b[1]-a[1])*f),Math.round(a[2]+(b[2]-a[2])*f)];}
+
+  var cv=$('cv'),ctx=cv.getContext('2d'),CUR=null,D=null,raf=0,t0=0;
+
+  function drawInto(ctx,W,H,S,D,m,pithR){
+    var NA=D.NA,NR=D.NR,span=Math.max(0.5,D.hi-D.lo);
+    var maxW=1; for(var wi=0;wi<S.wood.length;wi++){ if(S.wood[wi]>maxW) maxW=S.wood[wi]; }
+    var scale=(Math.min(W,H)*0.46)/maxW,px=W/2,py=H/2;   // 依實際外形縮到置中留邊，避免被切
+    var cum=[];
+    for(var a=0;a<NA;a++){var c=new Float32Array(NR+1);for(var j=0;j<NR;j++)c[j+1]=c[j]+Math.max(0.2,D.f[a][j]);cum.push(c);}
+    function rAt(a,f){var aI=Math.round(a/NA*720)%720,wb=S.wood[aI]*scale,Y=cum[a],jj=f*NR,j0=jj|0,fr=jj-j0,
+      yv=(Y[Math.min(NR,j0)]*(1-fr)+Y[Math.min(NR,j0+1)]*fr)/Y[NR];return wb*(f*(1-m)+yv*m);}
+    ctx.fillStyle='#050506';ctx.fillRect(0,0,W,H);
+    var STEP=Math.max(2,Math.round(NR/90));
+    for(var a2=0;a2<NA;a2++){var th0=a2*2*Math.PI/NA,th1=(a2+1)*2*Math.PI/NA;
+      for(var j2=0;j2<NR;j2+=STEP){var f0=j2/NR,f1=Math.min(1,(j2+STEP)/NR),val=D.f[a2][Math.min(NR-1,j2)],
+        t=(val-D.lo)/span,rgb=col(t),r0=rAt(a2,f0),r1=rAt(a2,f1),
+        dim=(0.30+0.70*Math.min(1,Math.pow(f0,0.55)+0.12))*0.46,g0=(rgb[0]+rgb[1]+rgb[2])/3;
+        ctx.fillStyle='rgb('+Math.round((rgb[0]*0.5+g0*0.5)*dim)+','+Math.round((rgb[1]*0.5+g0*0.5)*dim)+','+Math.round((rgb[2]*0.5+g0*0.5)*dim)+')';
+        ctx.beginPath();ctx.arc(px,py,r1,th0,th1);ctx.arc(px,py,r0,th1,th0,true);ctx.closePath();ctx.fill();}}
+    var K=44;
+    for(var k=1;k<K;k++){var fr=k/K;
+      ctx.strokeStyle='rgba('+Math.round(232-fr*40)+','+Math.round(190-fr*36)+','+Math.round(126-fr*24)+','+(0.34+0.5*fr)+')';
+      ctx.lineWidth=1.1;ctx.beginPath();
+      for(var a4=0;a4<=NA;a4++){var aa=a4%NA,Y=cum[aa],tot=Y[NR],target=fr*tot,jg=0;while(jg<NR&&Y[jg+1]<target)jg++;
+        var f=(jg+(target-Y[jg])/Math.max(1e-6,(Y[jg+1]-Y[jg])))/NR,th=aa*2*Math.PI/NA,r=rAt(aa,Math.min(1,f));
+        var X=px+Math.cos(th)*r,Yp=py+Math.sin(th)*r;a4?ctx.lineTo(X,Yp):ctx.moveTo(X,Yp);}
+      ctx.closePath();ctx.stroke();}
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(px,py,pithR||4.5,0,2*Math.PI);ctx.fill();
+  }
+  function render(m){ if(CUR) drawInto(ctx,cv.width,cv.height,CUR,D,m,4.5); }
+  // 靜態小曼陀羅（給立柱用）
+  function miniMandala(canvas,id){
+    var S=decode(WS_DATA[id]),Dm=densityField(S);
+    drawInto(canvas.getContext('2d'),canvas.width,canvas.height,S,Dm,0.42,2.4);
+  }
+  function loop(ts){ if(!t0)t0=ts; var e=(ts-t0)/1000;
+    var m=0.5-0.5*Math.cos(e*2*Math.PI/14);   // 14 秒呼吸：空間↔時間
+    render(m); raf=requestAnimationFrame(loop);
+  }
+
+  // ── 生命故事文字 ──
+  function pos(id){return WS_META.rank.indexOf(id);}    // 0=最年長
+  var N=WS_META.rank.length;
+  function ageWords(r){ // r 0..1  (0 年長)
+    if(r<0.15)return['年長','這是全批裡數一數二年長的木片。'];
+    if(r<0.38)return['偏年長','在這批木片裡，它算是資深的一片。'];
+    if(r<0.62)return['正值壯年','不老也不嫩，正是穩穩生長的中段。'];
+    if(r<0.85)return['偏年輕','它比多數木片來得年輕一些。'];
+    return['年輕','這是全批裡最年輕的一批木片之一。'];
+  }
+  function heartWords(h){
+    if(h>=0.40)return'它把很大一部分的身體，都沉澱成了深色的心材——那是樹最早、最堅實的核心。';
+    if(h>=0.25)return'心材已經穩穩地佔了它的中心，是一片踏實、成熟的木頭。';
+    if(h>=0.15)return'心材才剛開始在中央凝聚，大部分還是年輕、輸送養分的邊材。';
+    return'幾乎整片都是淺色的邊材——它還很年輕，時間才剛開始在它身上留下印記。';
+  }
+  function warmShare(){ // 由密度場算「順遂年份」比例
+    var lo=D.lo,mid=D.mid,n=0,w=0;
+    for(var a=0;a<D.NA;a++)for(var j=0;j<D.NR;j++){n++;if(D.f[a][j]<mid)w++;}
+    return w/n;
+  }
+  function branchNo(id){return id.split('-')[0];}
+  function partNo(id){return +id.split('-')[1];}
+
+  var SCREENS=['home','detail','planner','column'];
+  function screen(name){ cancelAnimationFrame(raf); SCREENS.forEach(function(s){$(s).style.display=(s===name?'block':'none');}); window.scrollTo(0,0); }
+  var detailFrom='home';
+  function show(id,from){
+    id=norm(id);
+    if(!WS_DATA[id]){ $('hint').textContent='找不到「'+id+'」，請確認編號（例如 3-1）'; $('hint').style.color='#c88'; return; }
+    $('hint').style.color=''; $('hint').textContent='或直接點下面的木片';
+    detailFrom=from||'home';
+    CUR=decode(WS_DATA[id]); D=densityField(CUR);
+    var r=pos(id), rr=r/(N-1), aw=ageWords(rr), h=WS_DATA[id].h;
+    $('dId').textContent=id;
+    $('dSub').textContent='同一棵老樟樹的一片';
+    // 年齡
+    $('ageLead').textContent=aw[0];
+    $('agePin').style.left=(rr*100)+'%';
+    $('ageBody').innerHTML=aw[1]+'　在全部 <b>'+N+'</b> 片木片中，依心材沉澱的程度，它排在第 <b>'+(r+1)+'</b> 位（越靠前越年長）。';
+    // 心材
+    var pct=Math.round(h*100);
+    $('gNum').textContent=pct+'%';
+    $('gArc').style.strokeDashoffset=(276*(1-h)).toFixed(1);
+    $('heartBody').innerHTML='這片木頭有 <b>'+pct+'%</b> 是心材。'+heartWords(h);
+    // 故事
+    var ws=warmShare(), part=partNo(id), pw= part<=2?'靠近樹幹基部':(part>=4?'靠近枝條末梢':'在枝幹的中段');
+    var yr = ws>0.58?'年輪多半舒展、間距寬——那是雨水充足、生長順遂的好年頭佔了多數。'
+           : ws<0.42?'不少年輪擠得很密——那是它熬過乾旱或寒冷、努力撐過去的年份。'
+           : '有寬有窄的年輪交錯著——順遂的年頭與艱難的年頭，它都一一走過。';
+    var story='這片木頭'+pw+'，'+aw[1].replace('。','，')+heartWords(h).replace('它','')+' '
+      +'看它的時間曼陀羅：'+yr+' 暖色的地方，是它從容生長的時光；冷色而緊密的地方，是它咬牙度過的季節。'
+      +'把這一圈圈疊起來，就是這棵老樟樹，在它身上寫下的一段人生。';
+    $('story').textContent=story;
+    var tags=[['相對年齡',aw[0]],['心材比例',pct+'%'],['位置',pw.replace('靠近','').replace('在','')],
+              ['生長性格', ws>0.58?'舒展從容':(ws<0.42?'堅忍緊實':'寬窄交錯')]];
+    $('tags').innerHTML=tags.map(function(t){return '<span class="tag">'+t[0]+'　<b>'+t[1]+'</b></span>';}).join('');
+    // 切換畫面
+    screen('detail');
+    t0=0; raf=requestAnimationFrame(loop);
+  }
+  function norm(id){return String(id).trim().replace(/[－–—]/g,'-').replace(/\s+/g,'');}
+
+  // ── 立柱規劃 ──
+  var myList=[];
+  function renderChips(){
+    $('myChips').innerHTML=myList.map(function(id){
+      var r=pos(id)/(N-1),rgb=col(1-r);
+      return '<span class="mychip"><span class="ca" style="background:rgb('+rgb.join(',')+')"></span>'+id
+        +'<button class="cx" data-id="'+id+'">×</button></span>';
+    }).join('');
+    $('toColumn').disabled = myList.length<2;
+    $('toColumn').textContent = myList.length<2 ? '至少加入 2 片' : '看我的立柱（依年紀排好，共 '+myList.length+' 片）';
+  }
+  function addMy(id){ id=norm(id); if(!WS_DATA[id]){ $('pHint').textContent='找不到「'+id+'」，請確認編號'; $('pHint').style.color='#c88'; return; }
+    $('pHint').style.color=''; $('pHint').textContent='通常一位參與者拿 5–6 片';
+    if(myList.indexOf(id)<0){ if(myList.length>=10){$('pHint').textContent='最多 10 片';return;} myList.push(id);} renderChips(); }
+  var flip=false, colMode='mandala';
+  function showColumn(){
+    var arr=myList.slice().sort(function(a,b){return WS_DATA[b].h-WS_DATA[a].h;}); // 老→嫩
+    if(flip) arr.reverse();
+    var oldest=myList.slice().sort(function(a,b){return WS_DATA[b].h-WS_DATA[a].h;})[0];
+    var youngest=myList.slice().sort(function(a,b){return WS_DATA[a].h-WS_DATA[b].h;})[0];
+    $('colTitle').textContent=myList.length+' 片 · 一根時間的柱子';
+    $('colSub').innerHTML='最年長的是 <b>'+oldest+'</b>，最年輕的是 <b>'+youngest+'</b>。下面由上到下＝'+(flip?'年輕→年長':'年長→年輕')+'。';
+    if(colMode==='lit') renderLit(arr); else renderMandalaCol(arr);
+    screen('column');
+  }
+  function renderMandalaCol(arr){
+    $('pillar').hidden=false; $('litStage').hidden=true;
+    $('colCap').textContent='點任一片可看它完整的年輪身分證。這是依年紀排好的建議，最後怎麼串，由你決定。';
+    var box=$('pillar'); box.innerHTML='';
+    arr.forEach(function(id){
+      var h=WS_DATA[id].h,r=pos(id),rr=r/(N-1),aw=ageWords(rr),pct=Math.round(h*100);
+      var d=document.createElement('div'); d.className='disc';
+      d.innerHTML='<canvas width="192" height="192"></canvas><div class="info">'
+        +'<div class="di">'+id+'</div><div class="dage">'+aw[0]+'　·　心材 '+pct+'%</div>'
+        +'<div class="dbar"><i style="width:'+Math.round(h*100/0.55*100)/100+'%;max-width:100%"></i></div>'
+        +'<div class="dend">全批第 '+(r+1)+' 年長 / 共 '+N+' 片</div></div>';
+      d.onclick=function(){ show(id,'column'); };
+      box.appendChild(d);
+      miniMandala(d.querySelector('canvas'), id);
+    });
+  }
+  // ── 亮燈模擬（越年輕越亮，尺寸依長短軸）──
+  var SIZES=(typeof WS_SIZES!=='undefined')?WS_SIZES:{};   // {id:[major_mm,minor_mm]}
+  var _ws={};
+  function woodStats(id){ if(_ws[id])return _ws[id]; var w=WS_DATA[id].wood,mn=1e9,mx=-1e9,s=0;
+    for(var i=0;i<w.length;i++){mn=Math.min(mn,w[i]);mx=Math.max(mx,w[i]);s+=w[i];}
+    return _ws[id]={major:mx,minor:mn,mean:s/w.length}; }
+  function sizeOf(id){ if(SIZES[id])return {major:SIZES[id][0],minor:SIZES[id][1],real:true};
+    var t=woodStats(id); return {major:t.mean*1.15,minor:t.mean*0.9,real:false}; } // 無真實尺寸時的示意
+  function brightOf(id){ var rr=pos(id)/(N-1); var b01=Math.pow(rr,2.2); return 0.12+0.88*b01; } // 越年輕(rr大)越亮
+  function renderLit(arr){
+    $('pillar').hidden=true; $('litStage').hidden=false;
+    var real=arr.every(function(id){return SIZES[id];});
+    $('colCap').innerHTML= real ? '依你填的長短軸，用真實比例模擬立柱點亮的樣子。點任一片看它的身分證。'
+      : '這是<b>示意</b>比例——等你把每片的長軸、短軸（做 CNC 時填的）給我，就能換成真實尺寸。';
+    var stage=$('litStage'); stage.innerHTML='';
+    var maxMaj=Math.max.apply(0,arr.map(function(id){return sizeOf(id).major;})),BASE=210;
+    arr.forEach(function(id){
+      var sz=sizeOf(id),w=sz.major/maxMaj*BASE,h=sz.minor/maxMaj*BASE,b=brightOf(id),pct=Math.round(WS_DATA[id].h*100);
+      var v=Math.round(b*255),glow=Math.round(b*26);
+      var row=document.createElement('div'); row.className='lslice';
+      row.style.margin=(-Math.round(h*0.14))+'px 0';
+      row.innerHTML='<div class="glow" style="width:'+w.toFixed(0)+'px;height:'+h.toFixed(0)+'px;'
+        +'background:radial-gradient(circle at 50% 42%, rgba(255,246,224,'+b.toFixed(3)+') 0%, rgba(255,232,196,'+(b*0.82).toFixed(3)+') 55%, rgba(160,120,70,'+(b*0.5).toFixed(3)+') 100%);'
+        +'box-shadow:0 0 '+glow+'px rgba(255,235,200,'+(b*0.7).toFixed(3)+')"></div>'
+        +'<div class="lt">'+id+'　亮度 '+v+'</div>';
+      row.onclick=function(){ show(id,'column'); };
+      stage.appendChild(row);
+    });
+    if(!$('litStage').nextElementSibling || !$('litStage').nextElementSibling.classList.contains('litNote')){}
+  }
+
+  // ── 建入口格 ──
+  var branches={};
+  WS_META.ids.forEach(function(id){var b=id.split('-')[0];(branches[b]=branches[b]||[]).push(id);});
+  var wrap=$('branches'),bks=Object.keys(branches).sort(function(a,b){return a-b;});
+  var zh=['','一','二','三','四','五','六','七','八','九'];
+  bks.forEach(function(b){
+    var div=document.createElement('div');div.className='branch';
+    var g=document.createElement('div');g.className='grid';
+    branches[b].sort(function(x,y){return (+x.split('-')[1])-(+y.split('-')[1]);}).forEach(function(id){
+      var h=WS_DATA[id].h, r=pos(id)/(N-1), rgb=col(1-r); // 年長=暖
+      var c=document.createElement('div');c.className='chip';
+      c.innerHTML='<div class="cid">'+id+'</div><div class="cdot" style="background:rgb('+rgb.join(',')+')"></div>';
+      c.onclick=function(){show(id);};
+      g.appendChild(c);
+    });
+    div.appendChild(g);wrap.appendChild(div);
+  });
+
+  $('go').onclick=function(){show($('q').value);};
+  $('q').addEventListener('keydown',function(e){if(e.key==='Enter')show(this.value);});
+  $('back').onclick=function(){ if(detailFrom==='column') showColumn(); else screen('home'); };
+  // 立柱規劃綁定
+  $('toPlanner').onclick=function(){ renderChips(); screen('planner'); };
+  $('pBack').onclick=function(){ screen('home'); };
+  $('pAdd').onclick=function(){ addMy($('pq').value); $('pq').value=''; $('pq').focus(); };
+  $('pq').addEventListener('keydown',function(e){ if(e.key==='Enter'){ addMy(this.value); this.value=''; } });
+  $('myChips').addEventListener('click',function(e){ var b=e.target.closest('.cx'); if(!b)return;
+    var id=b.dataset.id, i=myList.indexOf(id); if(i>=0)myList.splice(i,1); renderChips(); });
+  $('toColumn').onclick=function(){ if(myList.length>=2){ flip=false; showColumn(); } };
+  $('cBack').onclick=function(){ screen('planner'); };
+  $('flipDir').onclick=function(){ flip=!flip; showColumn(); };
+  $('colMode').addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
+    [].forEach.call(this.children,function(c){c.classList.remove('on');}); b.classList.add('on');
+    colMode=b.dataset.v; showColumn(); });
+})();
+</script>
+</body>
+</html>

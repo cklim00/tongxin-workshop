@@ -1,0 +1,3249 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>年輪凹槽曲線工具</title></head>
+<body style="margin:0">
+<script>window.TX_CLOUD_URL="https://script.google.com/macros/s/AKfycbx0YCgILmuunoEoaNQhhVjrGJ6_ddTQ2CXhVqTjrcDh3-7IYOgmWf4PCSlUf6ZWFGez/exec";</script>
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   《同心石光》M2 Ring Analyzer — 瀏覽器端年輪特徵擷取
+   對應規格書 3.3 辨識流程八步驟、3.4 建議擷取特徵
+   ---------------------------------------------------------------
+   科學敘事原則（規格 1.3）：本模組建立「一致、可重複的視覺特徵」，
+   不進行正式樹輪年代學鑑定，輸出不得被詮釋為精準樹齡。
+   ═══════════════════════════════════════════════════════════════ */
+
+var RingAnalyzer = (function () {
+
+  var WORK = 720;          // 分析工作解析度（長邊）
+  var RAYS = 48;           // 放射狀取樣方向數
+  var S = null;            // 目前分析狀態
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 0：載入影像並降採樣
+  // ─────────────────────────────────────────────────────────────
+  function load(img) {
+    var scale = Math.min(1, WORK / Math.max(img.naturalWidth, img.naturalHeight));
+    var w = Math.max(1, Math.round(img.naturalWidth * scale));
+    var h = Math.max(1, Math.round(img.naturalHeight * scale));
+    var c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    var ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, w, h);
+    var d = ctx.getImageData(0, 0, w, h).data;
+
+    var n = w * h;
+    var lum = new Float32Array(n), red = new Float32Array(n);
+    for (var i = 0; i < n; i++) {
+      var r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+      lum[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+      red[i] = r - (g + b) / 2;                       // 心材偏紅褐
+    }
+    S = {
+      w: w, h: h, rgba: d, lum: lum, red: red, srcScale: scale,
+      mask: null, heart: null, excl: new Uint8Array(n),
+      circles: [], pith: null, geom: null, rays: null, result: null
+    };
+    return { w: w, h: h };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 1：背景與外輪廓分割
+  // ─────────────────────────────────────────────────────────────
+  function segment(opt) {
+    opt = opt || {};
+    var w = S.w, h = S.h, n = w * h, d = S.rgba;
+
+    // 背景取樣：整圈邊框帶的中位數，而不是四個角落。
+    // 現場照片的角落常常正好是杯子、電線、另一片木頭；
+    // 整圈中位數即使有四分之一被雜物佔據，仍然抓得到真正的背景色。
+    var p = Math.max(6, Math.round(Math.min(w, h) * 0.04));
+    var bg = sampleBorder(d, w, h, p);
+
+    var dist = new Float32Array(n), maxD = 0;
+    for (var i = 0; i < n; i++) {
+      var dr = d[i * 4] - bg[0], dg = d[i * 4 + 1] - bg[1], db = d[i * 4 + 2] - bg[2];
+      var v = Math.sqrt(dr * dr + dg * dg + db * db);
+      dist[i] = v; if (v > maxD) maxD = v;
+    }
+    var thr = (opt.threshold != null)
+      ? opt.threshold * maxD
+      : otsu(dist, n, maxD) * (opt.sensitivity || 1.0);
+
+    // 線索 A：與背景色的距離（規格 3.1 的灰／黑背景下最準）
+    var rawA = new Uint8Array(n);
+    for (var j = 0; j < n; j++) rawA[j] = dist[j] > thr ? 1 : 0;
+
+    // 線索 B：彩度。木頭是有顏色的（黃褐／紅褐），而中性灰、黑、白大理石、
+    // 不鏽鋼杯都是無彩度的。當木片幾乎填滿畫面、邊框帶被樹皮與雜物佔據、
+    // 背景色估成木頭色而整張反轉時，這條線索仍然站得住。
+    var chroma = new Float32Array(n), maxC = 0;
+    for (var c = 0; c < n; c++) {
+      var r_ = d[c * 4], g_ = d[c * 4 + 1], b_ = d[c * 4 + 2];
+      var v = Math.max(r_, g_, b_) - Math.min(r_, g_, b_);
+      chroma[c] = v; if (v > maxC) maxC = v;
+    }
+    var thrC = otsu(chroma, n, Math.max(1, maxC)) * (opt.sensitivity || 1.0);
+    var rawB = new Uint8Array(n);
+    for (var j2 = 0; j2 < n; j2++) rawB[j2] = chroma[j2] > thrC ? 1 : 0;
+
+    // 兩條線索各自走完「開運算→挑元件」，用形狀分數（大、圓、在中央）決定採用哪一個。
+    // 順序很重要：先用較大的半徑做開運算，把電線、細枝這類「橋」斷掉，
+    // 木片才不會跟旁邊的雜物連成同一個元件。
+    var r0 = Math.max(3, Math.round(Math.min(w, h) * 0.012));
+    var candA = bestComponent(morphOpen(rawA, w, h, r0), w, h);
+    var candB = bestComponent(morphOpen(rawB, w, h, r0), w, h);
+    var pick = (candB.score > candA.score * 1.15) ? candB : candA;   // 同分時偏向規格預設的線索 A
+    S.segCue = (pick === candB) ? 'chroma' : 'bg_distance';
+    var mask = pick.mask;
+    fillHoles(mask, w, h);
+    mask = morphOpen(mask, w, h, 1);
+
+    S.mask = mask;
+    S.bg = bg; S.threshold = thr / maxD;
+    S.geom = geometry(mask, w, h);
+    // 重新分割 → 先前依賴舊 mask 的推導結果全部作廢
+    S.grad = null; S.sawLines = null; S.sawMasked = false; S.pithCands = null;
+    S.heart = null; S.rays = null; S._raysKey = null;
+
+    // 灰階照片偵測：木片區平均彩度極低＝黑白翻拍，墨水遮罩停用
+    var cSum = 0, cN = 0;
+    for (var ci = 0; ci < n; ci += 97) {
+      if (!mask[ci]) continue;
+      var cq = ci * 4, cR = S.rgba[cq], cG = S.rgba[cq + 1], cB = S.rgba[cq + 2];
+      cSum += Math.max(cR, cG, cB) - Math.min(cR, cG, cB); cN++;
+    }
+    S.grayImg = cN ? (cSum / cN < 8) : false;
+    // 自動排除鏡面高光（規格 3.3 第 3 點）＋ 麥克筆墨水
+    for (var k = 0; k < n; k++) S.excl[k] = (mask[k] && (S.lum[k] > 244 || (!S.grayImg && isInk_(k)))) ? 1 : 0;
+    applyCircles();
+    return S.geom;
+  }
+
+  // 麥克筆墨水判定：暗且幾乎無彩度（木頭再暗都帶橘褐色）。手寫編號／箭頭／X
+  // 是最強的假特徵——加進 S.excl 排除遮罩，心材、髓心、年輪射線就全部不受影響。
+  // 整張照片近乎灰階時（黑白翻拍）無從分辨墨水，S.grayImg=true 時停用。
+  function isInk_(i) {
+    var q = i * 4, d = S.rgba;
+    var r = d[q], g = d[q + 1], b = d[q + 2];
+    var mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+    var mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+    // 門檻要嚴：黑麥克筆極暗又極無彩度（實測 lum 30–60、彩度 <20）；
+    // 深色節疤／陰影雖暗但彩度較高或沒那麼暗——排除它們會傷害髓心與心材判定
+    //（P5 實測：寬鬆門檻使髓心偏心 0.15→0.94）。
+    return (mx - mn) < 24 && S.lum[i] < 80;
+  }
+
+  function sampleBorder(d, w, h, p) {
+    var rs = [], gs = [], bs = [], step = 2;
+    function take(x, y) { var i = (y * w + x) * 4; rs.push(d[i]); gs.push(d[i + 1]); bs.push(d[i + 2]); }
+    for (var y = 0; y < h; y += step) for (var x = 0; x < w; x += step) {
+      if (x < p || x >= w - p || y < p || y >= h - p) take(x, y);
+    }
+    return [median(rs), median(gs), median(bs)];
+  }
+
+  function sampleCorners(d, w, h, p) {
+    var pts = [[0, 0], [w - p, 0], [0, h - p], [w - p, h - p]];
+    var rs = [], gs = [], bs = [];
+    pts.forEach(function (pt) {
+      for (var y = pt[1]; y < pt[1] + p; y++) for (var x = pt[0]; x < pt[0] + p; x++) {
+        var i = (y * w + x) * 4; rs.push(d[i]); gs.push(d[i + 1]); bs.push(d[i + 2]);
+      }
+    });
+    return [median(rs), median(gs), median(bs)];
+  }
+
+  function otsu(vals, n, maxV) {
+    var bins = 256, hist = new Float64Array(bins);
+    for (var i = 0; i < n; i++) hist[Math.min(bins - 1, Math.floor(vals[i] / maxV * (bins - 1)))]++;
+    var sum = 0, total = n;
+    for (var t = 0; t < bins; t++) sum += t * hist[t];
+    var sumB = 0, wB = 0, best = 0, bestT = 0;
+    for (var t2 = 0; t2 < bins; t2++) {
+      wB += hist[t2]; if (!wB) continue;
+      var wF = total - wB; if (!wF) break;
+      sumB += t2 * hist[t2];
+      var mB = sumB / wB, mF = (sum - sumB) / wF;
+      var between = wB * wF * (mB - mF) * (mB - mF);
+      if (between > best) { best = between; bestT = t2; }
+    }
+    return bestT / (bins - 1) * maxV;
+  }
+
+  /**
+   * 在所有連通元件中挑最像木片的那一個。
+   * 評分＝面積 × 填滿率（面積 ÷ 外接橢圓面積，圓盤≈1、拖著電線的團塊很低）
+   *      × 中央加權（包含畫面中心點 ×1.5）。
+   * 只看「最大」會把杯子＋電線＋木片這種連在一起的團塊整個吃進來。
+   */
+  function bestComponent(bin, w, h) {
+    var n = w * h, lab = new Int32Array(n), q = new Int32Array(n);
+    var cur = 0, comps = [];
+    var cxI = (w / 2) | 0, cyI = (h / 2) | 0, centerIdx = cyI * w + cxI;
+    for (var s = 0; s < n; s++) {
+      if (!bin[s] || lab[s]) continue;
+      cur++; var head = 0, tail = 0, size = 0;
+      var minx = w, maxx = 0, miny = h, maxy = 0, hasCenter = false;
+      q[tail++] = s; lab[s] = cur;
+      while (head < tail) {
+        var i = q[head++]; size++;
+        var x = i % w, y = (i / w) | 0;
+        if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y;
+        if (i === centerIdx) hasCenter = true;
+        if (x > 0 && bin[i - 1] && !lab[i - 1]) { lab[i - 1] = cur; q[tail++] = i - 1; }
+        if (x < w - 1 && bin[i + 1] && !lab[i + 1]) { lab[i + 1] = cur; q[tail++] = i + 1; }
+        if (y > 0 && bin[i - w] && !lab[i - w]) { lab[i - w] = cur; q[tail++] = i - w; }
+        if (y < h - 1 && bin[i + w] && !lab[i + w]) { lab[i + w] = cur; q[tail++] = i + w; }
+      }
+      if (size < n * 0.01) continue;                       // 太小的碎片不考慮
+      var bw = maxx - minx + 1, bh = maxy - miny + 1;
+      var fill = size / (Math.PI * (bw / 2) * (bh / 2));    // 圓盤 ≈ 1
+      var score = size * Math.min(1, fill) * (hasCenter ? 1.5 : 1);
+      comps.push({ lab: cur, score: score, size: size });
+    }
+    var best = 0, bestScore = -1;
+    comps.forEach(function (c) { if (c.score > bestScore) { bestScore = c.score; best = c.lab; } });
+    if (!best) return { mask: largestComponent(bin, w, h), score: 0 };   // 沒有夠大的元件時退回舊行為
+    var out = new Uint8Array(n);
+    for (var k = 0; k < n; k++) out[k] = (lab[k] === best) ? 1 : 0;
+    return { mask: out, score: bestScore };
+  }
+
+  function largestComponent(bin, w, h) {
+    var n = w * h, lab = new Int32Array(n), q = new Int32Array(n);
+    var cur = 0, bestLab = 0, bestSize = 0;
+    for (var s = 0; s < n; s++) {
+      if (!bin[s] || lab[s]) continue;
+      cur++; var head = 0, tail = 0, size = 0;
+      q[tail++] = s; lab[s] = cur;
+      while (head < tail) {
+        var i = q[head++]; size++;
+        var x = i % w, y = (i / w) | 0;
+        if (x > 0 && bin[i - 1] && !lab[i - 1]) { lab[i - 1] = cur; q[tail++] = i - 1; }
+        if (x < w - 1 && bin[i + 1] && !lab[i + 1]) { lab[i + 1] = cur; q[tail++] = i + 1; }
+        if (y > 0 && bin[i - w] && !lab[i - w]) { lab[i - w] = cur; q[tail++] = i - w; }
+        if (y < h - 1 && bin[i + w] && !lab[i + w]) { lab[i + w] = cur; q[tail++] = i + w; }
+      }
+      if (size > bestSize) { bestSize = size; bestLab = cur; }
+    }
+    var out = new Uint8Array(n);
+    for (var k = 0; k < n; k++) out[k] = (lab[k] === bestLab) ? 1 : 0;
+    return out;
+  }
+
+  function fillHoles(mask, w, h) {
+    var n = w * h, vis = new Uint8Array(n), q = new Int32Array(n), tail = 0;
+    for (var x = 0; x < w; x++) {
+      if (!mask[x]) { vis[x] = 1; q[tail++] = x; }
+      var b = (h - 1) * w + x; if (!mask[b]) { vis[b] = 1; q[tail++] = b; }
+    }
+    for (var y = 0; y < h; y++) {
+      var l = y * w; if (!mask[l] && !vis[l]) { vis[l] = 1; q[tail++] = l; }
+      var r = y * w + w - 1; if (!mask[r] && !vis[r]) { vis[r] = 1; q[tail++] = r; }
+    }
+    var head = 0;
+    while (head < tail) {
+      var i = q[head++], xx = i % w, yy = (i / w) | 0;
+      if (xx > 0 && !mask[i - 1] && !vis[i - 1]) { vis[i - 1] = 1; q[tail++] = i - 1; }
+      if (xx < w - 1 && !mask[i + 1] && !vis[i + 1]) { vis[i + 1] = 1; q[tail++] = i + 1; }
+      if (yy > 0 && !mask[i - w] && !vis[i - w]) { vis[i - w] = 1; q[tail++] = i - w; }
+      if (yy < h - 1 && !mask[i + w] && !vis[i + w]) { vis[i + w] = 1; q[tail++] = i + w; }
+    }
+    for (var k = 0; k < n; k++) if (!mask[k] && !vis[k]) mask[k] = 1;
+  }
+
+  /** 開運算去除細小雜點。邊界以夾取索引處理，
+   *  否則貼齊畫面邊緣的木片會被誤蝕掉，導致「被裁切」偵測失效。 */
+  /** 開運算（先侵蝕再膨脹），半徑 r 的方形結構元素；用可分離的兩段一維掃描，速度與 r 無關 */
+  function morphOpen(mask, w, h, r) {
+    r = r || 1;
+    return dilate1(erode1(mask, w, h, r), w, h, r);
+  }
+  function erode1(src, w, h, r) {
+    // 邊界外視為與最近邊界像素相同：貼邊的木片不會被啃掉（原本的行為）
+    var tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+    for (var y = 0; y < h; y++) {
+      var row = y * w;
+      for (var x = 0; x < w; x++) {
+        var ok = 1;
+        for (var k = -r; k <= r; k++) { var xx = x + k; if (xx < 0) xx = 0; if (xx >= w) xx = w - 1; if (!src[row + xx]) { ok = 0; break; } }
+        tmp[row + x] = ok;
+      }
+    }
+    for (var x2 = 0; x2 < w; x2++) {
+      for (var y2 = 0; y2 < h; y2++) {
+        var ok2 = 1;
+        for (var k2 = -r; k2 <= r; k2++) { var yy = y2 + k2; if (yy < 0) yy = 0; if (yy >= h) yy = h - 1; if (!tmp[yy * w + x2]) { ok2 = 0; break; } }
+        out[y2 * w + x2] = ok2;
+      }
+    }
+    return out;
+  }
+  function dilate1(src, w, h, r) {
+    var tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+    for (var y = 0; y < h; y++) {
+      var row = y * w;
+      for (var x = 0; x < w; x++) {
+        var v = 0;
+        for (var k = -r; k <= r; k++) { var xx = x + k; if (xx < 0 || xx >= w) continue; if (src[row + xx]) { v = 1; break; } }
+        tmp[row + x] = v;
+      }
+    }
+    for (var x2 = 0; x2 < w; x2++) {
+      for (var y2 = 0; y2 < h; y2++) {
+        var v2 = 0;
+        for (var k2 = -r; k2 <= r; k2++) { var yy = y2 + k2; if (yy < 0 || yy >= h) continue; if (tmp[yy * w + x2]) { v2 = 1; break; } }
+        out[y2 * w + x2] = v2;
+      }
+    }
+    return out;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 1b：幾何特徵（面積、長短軸、圓度、輪廓不規則度）
+  // ─────────────────────────────────────────────────────────────
+  function geometry(mask, w, h) {
+    var area = 0, sx = 0, sy = 0, borderTouch = 0, perim = 0;
+    for (var y = 0; y < h; y++) for (var x = 0; x < w; x++) {
+      var i = y * w + x; if (!mask[i]) continue;
+      area++; sx += x; sy += y;
+      var edge = (x === 0 || y === 0 || x === w - 1 || y === h - 1);
+      if (edge) { borderTouch++; perim++; continue; }
+      if (!mask[i - 1] || !mask[i + 1] || !mask[i - w] || !mask[i + w]) perim++;
+    }
+    if (!area) return null;
+    var cx = sx / area, cy = sy / area;
+
+    var m20 = 0, m02 = 0, m11 = 0;
+    for (var y2 = 0; y2 < h; y2++) for (var x2 = 0; x2 < w; x2++) {
+      var j = y2 * w + x2; if (!mask[j]) continue;
+      var dx = x2 - cx, dy = y2 - cy;
+      m20 += dx * dx; m02 += dy * dy; m11 += dx * dy;
+    }
+    m20 /= area; m02 /= area; m11 /= area;
+    var tmp = Math.sqrt(4 * m11 * m11 + (m20 - m02) * (m20 - m02));
+    var l1 = (m20 + m02 + tmp) / 2, l2 = Math.max(1e-6, (m20 + m02 - tmp) / 2);
+    var major = 4 * Math.sqrt(l1), minor = 4 * Math.sqrt(l2);
+    var angle = 0.5 * Math.atan2(2 * m11, m20 - m02);
+
+    var eqR = Math.sqrt(area / Math.PI);
+    var P = perim * 0.95;                                   // 像素周長偏高，經驗修正
+    var roundness = clamp(4 * Math.PI * area / (P * P), 0, 1);
+    var irregularity = clamp(P / (2 * Math.PI * eqR) - 1, 0, 1);
+
+    return {
+      areaPx: area, cx: cx, cy: cy, perimeterPx: P,
+      majorPx: major, minorPx: minor, angleRad: angle,
+      eqRadiusPx: eqR, roundness: roundness, aspect: clamp(minor / major, 0, 1),
+      irregularity: irregularity,
+      maskFrac: area / (w * h), borderTouchFrac: borderTouch / Math.max(1, perim)
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 2：色彩分區 — 心材／邊材（2-means）
+  // ─────────────────────────────────────────────────────────────
+  function heartwood() {
+    var n = S.w * S.h, feat = new Float32Array(n), idx = [];
+    var lmin = 1e9, lmax = -1e9, rmin = 1e9, rmax = -1e9;
+    for (var i = 0; i < n; i++) {
+      if (!S.mask[i] || S.excl[i]) continue;
+      idx.push(i);
+      if (S.lum[i] < lmin) lmin = S.lum[i]; if (S.lum[i] > lmax) lmax = S.lum[i];
+      if (S.red[i] < rmin) rmin = S.red[i]; if (S.red[i] > rmax) rmax = S.red[i];
+    }
+    if (idx.length < 50) { S.heart = new Uint8Array(n); return { ratio: 0, ok: false }; }
+    var lr = Math.max(1, lmax - lmin), rr = Math.max(1, rmax - rmin);
+    for (var k = 0; k < idx.length; k++) {
+      var j = idx[k];
+      feat[j] = 0.55 * (1 - (S.lum[j] - lmin) / lr) + 0.45 * ((S.red[j] - rmin) / rr);
+    }
+    var vals = idx.map(function (j) { return feat[j]; }).sort(function (a, b) { return a - b; });
+    var c0 = vals[Math.floor(vals.length * 0.25)], c1 = vals[Math.floor(vals.length * 0.75)];
+    for (var it = 0; it < 12; it++) {
+      var s0 = 0, n0 = 0, s1 = 0, n1 = 0;
+      for (var m = 0; m < idx.length; m++) {
+        var v = feat[idx[m]];
+        if (Math.abs(v - c0) <= Math.abs(v - c1)) { s0 += v; n0++; } else { s1 += v; n1++; }
+      }
+      var nc0 = n0 ? s0 / n0 : c0, nc1 = n1 ? s1 / n1 : c1;
+      if (Math.abs(nc0 - c0) < 1e-4 && Math.abs(nc1 - c1) < 1e-4) { c0 = nc0; c1 = nc1; break; }
+      c0 = nc0; c1 = nc1;
+    }
+    // 第一階段：逐像素二分類（較深／較紅 = 心材候選）
+    var cls = new Uint8Array(n);
+    for (var q = 0; q < idx.length; q++) {
+      var p = idx[q], v2 = feat[p];
+      if (Math.abs(v2 - c1) < Math.abs(v2 - c0)) cls[p] = 1;
+    }
+
+    // 第二階段：心材是一個「盤」，不是散落的條紋。
+    // 粗鋸未磨的表面上，斜向鋸痕又深又寬，逐像素分類會把它們全當成心材。
+    // 改從幾何中心往外沿 48 個方向掃描：候選像素的累積比例掉到 0.55 以下
+    // 的地方就是該方向的心材邊界；鋸痕在邊材帶裡是稀疏的，撐不起這個比例。
+    var cx0 = S.geom ? S.geom.cx : S.w / 2, cy0 = S.geom ? S.geom.cy : S.h / 2;
+    var NR = 48, rad = new Float32Array(NR);
+    for (var a = 0; a < NR; a++) {
+      var th = a * 2 * Math.PI / NR, ct = Math.cos(th), st = Math.sin(th);
+      // 沿射線取樣候選標記，再用「局部視窗密度」找第一次掉到 0.5 以下的位置。
+      // 用累積比例會太寬鬆（核心全是心材時，累積值一路撐到很外面才掉下來）。
+      var prof = [], rr = [];
+      for (var r = 1; r < 2000; r++) {
+        var x = Math.round(cx0 + ct * r), y = Math.round(cy0 + st * r);
+        if (x < 0 || y < 0 || x >= S.w || y >= S.h) break;
+        var i2 = y * S.w + x;
+        if (!S.mask[i2]) break;
+        if (S.excl[i2]) continue;
+        prof.push(cls[i2]); rr.push(r);
+      }
+      var L = prof.length, edge = 0;
+      if (L >= 12) {
+        var W = Math.max(4, Math.round(L * 0.05));          // 半視窗
+        var firstDrop = -1;
+        for (var m = W; m < L - W; m++) {
+          var sum = 0;
+          for (var k0 = m - W; k0 <= m + W; k0++) sum += prof[k0];
+          var dens = sum / (2 * W + 1);
+          if (dens >= 0.5) { if (firstDrop < 0) edge = rr[m]; }
+          else if (m > W && edge > 0) { firstDrop = m; break; }
+        }
+        if (firstDrop < 0 && edge > 0) edge = rr[L - 1];   // 到樹皮都沒掉下來：整條都是心材
+      }
+      rad[a] = edge;
+    }
+    // 方向間用中位數濾波平滑，單一方向被裂縫或反光打斷不會缺一角
+    var rad2 = new Float32Array(NR);
+    for (var a2 = 0; a2 < NR; a2++) {
+      var win = [];
+      for (var k = -2; k <= 2; k++) win.push(rad[(a2 + k + NR) % NR]);
+      win.sort(function (u, v) { return u - v; });
+      rad2[a2] = win[2];
+    }
+    var heart = new Uint8Array(n), hc = 0, hx = 0, hy = 0;
+    for (var q2 = 0; q2 < idx.length; q2++) {
+      var p2 = idx[q2], px = p2 % S.w, py = (p2 / S.w) | 0;
+      var dx = px - cx0, dy = py - cy0;
+      var ang = Math.atan2(dy, dx); if (ang < 0) ang += 2 * Math.PI;
+      var ai = Math.round(ang / (2 * Math.PI) * NR) % NR;
+      if (Math.sqrt(dx * dx + dy * dy) <= rad2[ai]) { heart[p2] = 1; hc++; hx += px; hy += py; }
+    }
+    S.heart = heart;
+    S.heartCentroid = hc > 20 ? { x: hx / hc, y: hy / hc } : null;
+    var ratio = hc / idx.length;
+    S.heartRatio = ratio;
+    // 心材佔比極端時（近乎全片或幾乎沒有）視為分區不可靠
+    S.heartReliable = (ratio > 0.04 && ratio < 0.92);
+    return { ratio: ratio, ok: S.heartReliable };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 3：髓心候選定位（可人工覆核）
+  // ─────────────────────────────────────────────────────────────
+  function autoPith() {
+    var cands = pithCandidates();
+    var c = cands[0];
+    S.pith = { x: c.x, y: c.y, source: 'auto_' + c.source };
+    S._raysKey = null;
+    return S.pith;
+  }
+  function setPith(x, y) { S.pith = { x: x, y: y, source: 'manual' }; S._raysKey = null; return S.pith; }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 3b：人工痕跡遮罩（LED 凹槽、鋸痕、裂縫）
+  // ─────────────────────────────────────────────────────────────
+  function addCircle(x, y, r, kind) { S.circles.push({ x: x, y: y, r: r, kind: kind || 'groove' }); applyCircles(); }
+  function popCircle() { S.circles.pop(); applyCircles(); }
+  function clearCircles() { S.circles = []; applyCircles(); }
+
+  function applyCircles() {
+    var n = S.w * S.h;
+    S._raysKey = null;              // 遮罩改了，兩遍年輪結果作廢，compute 會重算
+    for (var i = 0; i < n; i++) S.excl[i] = (S.mask && S.mask[i] && (S.lum[i] > 244 || (!S.grayImg && isInk_(i)))) ? 1 : 0;
+    // 鋸痕遮罩是分析結果的一部分，重畫排除圓時不可把它洗掉
+    if (S.sawMasked && S.sawLines && S.sawLines.length) {
+      for (var y0 = 0; y0 < S.h; y0++) for (var x0 = 0; x0 < S.w; x0++) {
+        var k0 = y0 * S.w + x0;
+        if (!S.mask[k0] || S.excl[k0]) continue;
+        for (var q0 = 0; q0 < S.sawLines.length; q0++) {
+          var t0 = S.sawLines[q0].theta_deg * Math.PI / 180;
+          if (Math.abs(x0 * Math.cos(t0) + y0 * Math.sin(t0) - S.sawLines[q0].rho) <= 7) { S.excl[k0] = 1; break; }
+        }
+      }
+    }
+    S.circles.forEach(function (c) {
+      var x0 = Math.max(0, Math.floor(c.x - c.r)), x1 = Math.min(S.w - 1, Math.ceil(c.x + c.r));
+      var y0 = Math.max(0, Math.floor(c.y - c.r)), y1 = Math.min(S.h - 1, Math.ceil(c.y + c.r));
+      for (var y = y0; y <= y1; y++) for (var x = x0; x <= x1; x++) {
+        var dx = x - c.x, dy = y - c.y;
+        if (dx * dx + dy * dy <= c.r * c.r) S.excl[y * S.w + x] = 1;
+      }
+    });
+  }
+
+  /** 建議 LED 凹槽位置：木片中央附近的高亮圓形區（附錄 A.2 現象） */
+  function suggestGroove() {
+    if (!S.geom) return null;
+    var cx = S.geom.cx, cy = S.geom.cy, R = S.geom.eqRadiusPx * 0.55;
+    var cnt = 0, sx = 0, sy = 0;
+    for (var y = Math.max(0, cy - R); y < Math.min(S.h, cy + R); y++) {
+      for (var x = Math.max(0, cx - R); x < Math.min(S.w, cx + R); x++) {
+        var i = (y | 0) * S.w + (x | 0);
+        if (S.mask[i] && S.lum[i] > 205) { cnt++; sx += x; sy += y; }
+      }
+    }
+    if (cnt < 60) return null;
+    return { x: sx / cnt, y: sy / cnt, r: Math.sqrt(cnt / Math.PI) * 1.25 };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // v0.2 Step A：拍攝前影像品質檢查（規格 3.2）
+  // 在建立正式 scan 之前跑，模糊／反光／遮擋／出框都在這裡擋下來。
+  // ─────────────────────────────────────────────────────────────
+  function qualityCheck(img, opt) {
+    opt = opt || {};
+    var Q = 480;
+    var sc = Math.min(1, Q / Math.max(img.naturalWidth || img.width, img.naturalHeight || img.height));
+    var w = Math.max(1, Math.round((img.naturalWidth || img.width) * sc));
+    var h = Math.max(1, Math.round((img.naturalHeight || img.height) * sc));
+    var c = document.createElement('canvas'); c.width = w; c.height = h;
+    var ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, w, h);
+    var d = ctx.getImageData(0, 0, w, h).data;
+    var n = w * h, lum = new Float32Array(n);
+    for (var i = 0; i < n; i++) lum[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+
+    // 1) 清晰度：Laplacian variance
+    var lap = [];
+    for (var y = 1; y < h - 1; y++) for (var x = 1; x < w - 1; x++) {
+      var k = y * w + x;
+      lap.push(4 * lum[k] - lum[k - 1] - lum[k + 1] - lum[k - w] - lum[k + w]);
+    }
+    var blurVar = varianceOf(lap);
+
+    // 2) 過曝／反光比例
+    var hot = 0; for (var j = 0; j < n; j++) if (lum[j] > 250) hot++;
+    var overexposed = hot / n;
+
+    // 3) 粗分割 → 入框安全距離
+    var bgq = sampleCorners(d, w, h, Math.max(4, Math.round(Math.min(w, h) * 0.06)));
+    var dist = new Float32Array(n), maxD = 0;
+    for (var m = 0; m < n; m++) {
+      var dr = d[m * 4] - bgq[0], dg = d[m * 4 + 1] - bgq[1], db = d[m * 4 + 2] - bgq[2];
+      var v = Math.sqrt(dr * dr + dg * dg + db * db);
+      dist[m] = v; if (v > maxD) maxD = v;
+    }
+    var thr = otsu(dist, n, maxD);
+    var raw = new Uint8Array(n);
+    for (var q = 0; q < n; q++) raw[q] = dist[q] > thr ? 1 : 0;
+    var mk = largestComponent(raw, w, h);
+    fillHoles(mk, w, h);
+
+    var area = 0, minX = w, maxX = 0, minY = h, maxY = 0;
+    for (var yy = 0; yy < h; yy++) for (var xx = 0; xx < w; xx++) {
+      if (!mk[yy * w + xx]) continue;
+      area++;
+      if (xx < minX) minX = xx; if (xx > maxX) maxX = xx;
+      if (yy < minY) minY = yy; if (yy > maxY) maxY = yy;
+    }
+    var found = area > n * 0.02;
+    var marginPx = found ? Math.min(minX, minY, w - 1 - maxX, h - 1 - maxY) : 0;
+    var marginFrac = marginPx / Math.min(w, h);
+    var fillFrac = area / n;
+
+    // 4) 遮擋：不能用膚色判斷 —— 樟木本身就是膚色，會把每一張照片都判成「有手」。
+    //    改用兩個手才有、木頭沒有的性質：表面幾乎沒有紋理，而且一定從畫面邊緣伸進來。
+    var smooth = new Uint8Array(n);
+    for (var ys = 1; ys < h - 1; ys++) for (var xs = 1; xs < w - 1; xs++) {
+      var si = ys * w + xs;
+      if (!mk[si]) continue;
+      var loc = Math.abs(4 * lum[si] - lum[si - 1] - lum[si + 1] - lum[si - w] - lum[si + w]);
+      if (loc < 3.0) smooth[si] = 1;
+    }
+    var vis2 = new Uint8Array(n), stack = new Int32Array(n), sp = 0, occArea = 0;
+    for (var bx = 0; bx < w; bx++) {
+      var tb = bx, bb2 = (h - 1) * w + bx;
+      if (smooth[tb] && !vis2[tb]) { vis2[tb] = 1; stack[sp++] = tb; }
+      if (smooth[bb2] && !vis2[bb2]) { vis2[bb2] = 1; stack[sp++] = bb2; }
+    }
+    for (var by = 0; by < h; by++) {
+      var lb = by * w, rb = by * w + w - 1;
+      if (smooth[lb] && !vis2[lb]) { vis2[lb] = 1; stack[sp++] = lb; }
+      if (smooth[rb] && !vis2[rb]) { vis2[rb] = 1; stack[sp++] = rb; }
+    }
+    while (sp > 0) {
+      var ci = stack[--sp]; occArea++;
+      var cxp = ci % w, cyp = (ci / w) | 0;
+      if (cxp > 0 && smooth[ci - 1] && !vis2[ci - 1]) { vis2[ci - 1] = 1; stack[sp++] = ci - 1; }
+      if (cxp < w - 1 && smooth[ci + 1] && !vis2[ci + 1]) { vis2[ci + 1] = 1; stack[sp++] = ci + 1; }
+      if (cyp > 0 && smooth[ci - w] && !vis2[ci - w]) { vis2[ci - w] = 1; stack[sp++] = ci - w; }
+      if (cyp < h - 1 && smooth[ci + w] && !vis2[ci + w]) { vis2[ci + w] = 1; stack[sp++] = ci + w; }
+    }
+    var occlusion = area ? occArea / area : 0;
+
+    var checks = [
+      { key: 'framing',  pass: found && marginFrac > 0.03 && fillFrac < 0.80,
+        msg: !found ? '沒有看到木片，請放到定位框中央'
+           : (marginFrac <= 0.03 ? '木片太靠邊，請往中央移動' : '木片太大，請往後放一點'),
+        value: r3(marginFrac) },
+      { key: 'sharpness', pass: blurVar >= (opt.blurMin || 55),
+        msg: '畫面模糊，請保持穩定再拍一次', value: r2(blurVar) },
+      { key: 'exposure',  pass: overexposed < 0.04,
+        msg: '表面反光，請稍微轉一下木片的角度', value: r3(overexposed) },
+      { key: 'occlusion', pass: occlusion < 0.10,
+        msg: '有東西蓋住木片，請把手移開', value: r3(occlusion) }
+    ];
+    var failed = checks.filter(function (x) { return !x.pass; });
+    return {
+      pass: failed.length === 0,
+      score: r3(checks.filter(function (x) { return x.pass; }).length / checks.length),
+      checks: checks,
+      firstMessage: failed.length ? failed[0].msg : '位置很好，可以拍了',
+      metrics: { blur_var: r2(blurVar), overexposed: r3(overexposed),
+                 margin_frac: r3(marginFrac), fill_frac: r3(fillFrac), occlusion: r3(occlusion) }
+    };
+  }
+
+  function varianceOf(a) {
+    var n = a.length; if (!n) return 0;
+    var m = 0; for (var i = 0; i < n; i++) m += a[i]; m /= n;
+    var v = 0; for (var j = 0; j < n; j++) v += (a[j] - m) * (a[j] - m);
+    return v / n;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // v0.2 Step B：梯度場、鋸痕直線偵測、髓心候選
+  // ─────────────────────────────────────────────────────────────
+
+  /** Sobel 梯度；只在木片內且未被排除的像素上計算 */
+  function gradientField() {
+    if (S.grad) return S.grad;
+    var w = S.w, h = S.h, n = w * h;
+    var gx = new Float32Array(n), gy = new Float32Array(n), gm = new Float32Array(n);
+    for (var y = 1; y < h - 1; y++) for (var x = 1; x < w - 1; x++) {
+      var i = y * w + x;
+      if (!S.mask[i]) continue;
+      var a = S.lum;
+      var sx = (a[i - w + 1] + 2 * a[i + 1] + a[i + w + 1]) - (a[i - w - 1] + 2 * a[i - 1] + a[i + w - 1]);
+      var sy = (a[i + w - 1] + 2 * a[i + w] + a[i + w + 1]) - (a[i - w - 1] + 2 * a[i - w] + a[i - w + 1]);
+      gx[i] = sx; gy[i] = sy; gm[i] = Math.sqrt(sx * sx + sy * sy);
+    }
+    S.grad = { gx: gx, gy: gy, gm: gm };
+    return S.grad;
+  }
+
+  /**
+   * 鋸痕偵測（規格 AT-03）：木片內的強梯度像素若共線成長直線，即判為切削痕。
+   * 年輪是彎的、鋸痕是直的 —— 這是兩者唯一穩定的區別。
+   * 以粗 Hough 找主導直線，回傳線段供遮罩使用。
+   */
+  function detectSawMarks(opt) {
+    opt = opt || {};
+    var g = gradientField(), w = S.w, h = S.h;
+    var pts = [], step = 2;
+    var mags = [];
+    for (var y = 1; y < h - 1; y += step) for (var x = 1; x < w - 1; x += step) {
+      var i = y * w + x;
+      if (S.mask[i] && !S.excl[i] && g.gm[i] > 0) mags.push(g.gm[i]);
+    }
+    if (mags.length < 200) return [];
+    mags.sort(function (a, b) { return a - b; });
+    var gThr = mags[Math.floor(mags.length * 0.93)];   // 取最強的 7% 邊緣點
+    for (var y2 = 1; y2 < h - 1; y2 += step) for (var x2 = 1; x2 < w - 1; x2 += step) {
+      var j = y2 * w + x2;
+      if (S.mask[j] && !S.excl[j] && g.gm[j] >= gThr) pts.push([x2, y2]);
+    }
+    if (pts.length < 120) return [];
+
+    // ── 梯度導引 Hough ──
+    // 關鍵：每個邊緣點只投給「與自己梯度方向一致」的角度，而不是全部 180 度。
+    // 直線上的點梯度方向一致 → 票集中成尖峰；
+    // 同心年輪上的點梯度是放射狀、方向各異 → 票散開，不會形成假尖峰。
+    // 沒有這一步，任何穿過木片的窄帶都會蒐集到大量票數而被誤判為鋸痕。
+    var diag = Math.sqrt(w * w + h * h);
+    var NA = 180;
+    var NR = Math.max(64, Math.round(2 * diag / 2));      // rho 解析度約 2 px
+    var acc = new Int32Array(NA * NR);
+    var cos = new Float32Array(NA), sin = new Float32Array(NA);
+    for (var a2 = 0; a2 < NA; a2++) { var t = a2 * Math.PI / NA; cos[a2] = Math.cos(t); sin[a2] = Math.sin(t); }
+
+    var SPREAD = 4;                                        // 容許 ±4 度的梯度方向誤差
+    for (var p = 0; p < pts.length; p++) {
+      var pi = pts[p][1] * w + pts[p][0];
+      var ang = Math.atan2(g.gy[pi], g.gx[pi]) * 180 / Math.PI;   // 梯度方向 = 直線法線方向
+      var a0 = Math.round(((ang % 180) + 180) % 180);
+      for (var da = -SPREAD; da <= SPREAD; da++) {
+        var a3 = ((a0 + da) % NA + NA) % NA;
+        var rho = pts[p][0] * cos[a3] + pts[p][1] * sin[a3];
+        var ri = Math.round((rho + diag) / (2 * diag) * (NR - 1));
+        if (ri >= 0 && ri < NR) acc[a3 * NR + ri]++;
+      }
+    }
+
+    // 先抽出前 8 個峰值，門檻再由「這張影像自己的雜訊底線」決定。
+    // 固定門檻在不同尺寸與對比的木片上並不可靠：同一個數字對這片太鬆、對那片太緊。
+    var peaks = [];
+    for (var k = 0; k < 8; k++) {
+      var best = 0, bi = -1;
+      for (var m2 = 0; m2 < acc.length; m2++) if (acc[m2] > best) { best = acc[m2]; bi = m2; }
+      if (bi < 0 || best <= 0) break;
+      var ai = (bi / NR) | 0, rri = bi % NR;
+      var theta = ai * Math.PI / NA;
+      var rho2 = rri / (NR - 1) * 2 * diag - diag;
+      peaks.push({ theta_deg: r2(theta * 180 / Math.PI), rho: r2(rho2), votes: best });
+      // 抑制鄰近峰值
+      for (var da2 = -8; da2 <= 8; da2++) for (var dr = -6; dr <= 6; dr++) {
+        var na = ((ai + da2) % NA + NA) % NA, nr = rri + dr;
+        if (nr >= 0 && nr < NR) acc[na * NR + nr] = 0;
+      }
+    }
+    if (!peaks.length) { S.sawLines = []; return []; }
+
+    // 雜訊底線＝第 4–8 名峰值的中位數。同心年輪不會形成尖峰，因此乾淨影像的
+    // 最高峰與底線幾乎一樣高；真有鋸痕時才會拉開差距（合成影像實測 64 : 18）。
+    var tail = peaks.slice(3).map(function (x) { return x.votes; });
+    var floorV = tail.length ? median(tail) : peaks[peaks.length - 1].votes;
+    var eqR = S.geom.eqRadiusPx;
+    var stripFrac = (2 * (2 * diag / NR)) / (Math.PI * eqR);
+    var needStat = Math.round(pts.length * stripFrac * (2 * SPREAD + 1) / NA * 6);
+    var need = Math.max(25, needStat, Math.round(2.2 * floorV));
+
+    var lines = peaks.filter(function (x) { return x.votes >= need; }).slice(0, opt.maxLines || 3);
+    S.sawPeaks = peaks;
+    S.sawDebug = { need: need, noise_floor: floorV, needStat: needStat, points: pts.length };
+    S.sawLines = lines;
+    return lines;
+  }
+
+  /** 把偵測到的鋸痕加成帶狀排除區（寬度預設 ±7 px） */
+  function maskSawMarks(halfWidth) {
+    var lines = S.sawLines || detectSawMarks();
+    if (!lines.length) return 0;
+    var hw = halfWidth || 7, count = 0;
+    S._raysKey = null;
+    for (var y = 0; y < S.h; y++) for (var x = 0; x < S.w; x++) {
+      var i = y * S.w + x;
+      if (!S.mask[i] || S.excl[i]) continue;
+      for (var k = 0; k < lines.length; k++) {
+        var t = lines[k].theta_deg * Math.PI / 180;
+        var dd = Math.abs(x * Math.cos(t) + y * Math.sin(t) - lines[k].rho);
+        if (dd <= hw) { S.excl[i] = 1; count++; break; }
+      }
+    }
+    S.sawMasked = true;
+    return count;
+  }
+
+  /**
+   * 髓心候選（規格 4.1 第 5 點：提出 1–3 個候選，不假裝唯一正確）。
+   * 評分原理：年輪是繞著髓心的同心曲線，因此紋理梯度方向應與「該點到髓心的半徑」平行。
+   * 對候選點網格計算這個平行度，分數最高者即最可能的生長中心。
+   */
+  function pithCandidates() {
+    var g = gradientField(), w = S.w, h = S.h;
+    // 取樣強梯度點作為評分依據
+    var samp = [], step = 3;
+    var mags = [];
+    for (var y = 1; y < h - 1; y += step) for (var x = 1; x < w - 1; x += step) {
+      var i = y * w + x;
+      if (S.mask[i] && !S.excl[i]) mags.push(g.gm[i]);
+    }
+    var gThr = 0;
+    if (mags.length > 50) { mags.sort(function (a, b) { return a - b; }); gThr = mags[Math.floor(mags.length * 0.7)]; }
+    for (var y2 = 1; y2 < h - 1; y2 += step) for (var x2 = 1; x2 < w - 1; x2 += step) {
+      var j = y2 * w + x2;
+      if (S.mask[j] && !S.excl[j] && g.gm[j] >= gThr) samp.push(j);
+    }
+    if (samp.length > 3000) {
+      var stride = Math.ceil(samp.length / 3000), thin = [];
+      for (var s2 = 0; s2 < samp.length; s2 += stride) thin.push(samp[s2]);
+      samp = thin;
+    }
+
+    function scoreAt(px, py) {
+      if (!samp.length) return 0;
+      var sum = 0, wsum = 0;
+      for (var k = 0; k < samp.length; k++) {
+        var idx = samp[k], x = idx % w, y = (idx / w) | 0;
+        var rx = x - px, ry = y - py, rl = Math.sqrt(rx * rx + ry * ry);
+        if (rl < 8) continue;
+        var gl = g.gm[idx]; if (gl <= 0) continue;
+        var cosv = Math.abs((g.gx[idx] * rx + g.gy[idx] * ry) / (gl * rl));
+        sum += cosv * gl; wsum += gl;
+      }
+      return wsum ? sum / wsum : 0;
+    }
+
+    // 粗網格搜尋（限制在木片內）
+    var G = 13, best = [];
+    var bb = S.geom;
+    var r = bb.eqRadiusPx * 0.85;
+    for (var gy = 0; gy < G; gy++) for (var gx2 = 0; gx2 < G; gx2++) {
+      var cx = bb.cx + (gx2 / (G - 1) - 0.5) * 2 * r;
+      var cy = bb.cy + (gy / (G - 1) - 0.5) * 2 * r;
+      var ix = Math.round(cy) * w + Math.round(cx);
+      if (ix < 0 || ix >= w * h || !S.mask[ix]) continue;
+      best.push({ x: cx, y: cy, score: scoreAt(cx, cy) });
+    }
+    best.sort(function (a, b) { return b.score - a.score; });
+    if (!best.length) {
+      return [{ x: bb.cx, y: bb.cy, score: 0, source: 'geometric_centroid', label: '幾何中心' }];
+    }
+
+    // 對最佳點做一次局部精化
+    var top = best[0], stepR = r / (G - 1);
+    for (var it = 0; it < 3; it++) {
+      var improved = top;
+      for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+        if (!dx && !dy) continue;
+        var nx = top.x + dx * stepR, ny = top.y + dy * stepR;
+        var ni = Math.round(ny) * w + Math.round(nx);
+        if (ni < 0 || ni >= w * h || !S.mask[ni]) continue;
+        var sc2 = scoreAt(nx, ny);
+        if (sc2 > improved.score) improved = { x: nx, y: ny, score: sc2 };
+      }
+      top = improved; stepR /= 2;
+    }
+
+    var out = [{ x: top.x, y: top.y, score: r3(top.score), source: 'ring_curvature', label: '紋理曲率推測' }];
+    if (S.heartReliable && S.heartCentroid) {
+      out.push({ x: S.heartCentroid.x, y: S.heartCentroid.y,
+                 score: r3(scoreAt(S.heartCentroid.x, S.heartCentroid.y)),
+                 source: 'heartwood_centroid', label: '心材中心' });
+    }
+    out.push({ x: bb.cx, y: bb.cy, score: r3(scoreAt(bb.cx, bb.cy)),
+               source: 'geometric_centroid', label: '幾何中心' });
+
+    // 去除彼此太近的候選（相距小於等效半徑 12%）
+    var dedup = [];
+    out.forEach(function (c) {
+      var near = dedup.some(function (e) { return Math.hypot(e.x - c.x, e.y - c.y) < bb.eqRadiusPx * 0.12; });
+      if (!near) dedup.push(c);
+    });
+    dedup.sort(function (a, b) { return b.score - a.score; });
+
+    // ── 生物學約束：髓心一定在心材裡面 ──
+    // 紋理曲率估計會被「心材／邊材交界」與「樹皮那一圈」的強邊界帶著跑，
+    // 在未研磨的木片上常常把髓心丟到邊緣去。心材分區可靠時，
+    // 落在心材外的候選一律降級；沒有任何候選落在心材內時，以心材中心為準。
+    if (S.heartReliable && S.heart) {
+      var inHeart = function (c) {
+        var ix = Math.round(c.y) * S.w + Math.round(c.x);
+        return ix >= 0 && ix < S.w * S.h && S.heart[ix] === 1;
+      };
+      var inside = dedup.filter(inHeart), outside = dedup.filter(function (c) { return !inHeart(c); });
+      outside.forEach(function (c) { c.demoted = '在心材之外'; });
+      dedup = inside.concat(outside);
+      if (!inside.length && S.heartCentroid) {
+        dedup.unshift({ x: S.heartCentroid.x, y: S.heartCentroid.y,
+                        score: r3(scoreAt(S.heartCentroid.x, S.heartCentroid.y)),
+                        source: 'heartwood_centroid', label: '心材中心' });
+      }
+    }
+    S.pithCands = dedup.slice(0, 3);
+    return S.pithCands;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 4–7：放射狀分析、環狀特徵、信心評分
+  // ─────────────────────────────────────────────────────────────
+  /**
+   * @param {number} mmPerPx
+   * @param {number} [lagHint] 這片木片的年輪尺度（px）。給了就只在它附近找，
+   *        避免自相關鎖到倍頻。第一遍不給、算出中位數後第二遍再給。
+   */
+  function radial(mmPerPx, lagHint) {
+    if (!S.pith) autoPith();
+    var rays = [], px = S.pith.x, py = S.pith.y;
+
+    for (var k = 0; k < RAYS; k++) {
+      var th = k * 2 * Math.PI / RAYS, ct = Math.cos(th), st = Math.sin(th);
+      var prof = [], exc = 0, r = 1;
+      for (; r < 2000; r++) {
+        var x = Math.round(px + ct * r), y = Math.round(py + st * r);
+        if (x < 0 || y < 0 || x >= S.w || y >= S.h) break;
+        var i = y * S.w + x;
+        if (!S.mask[i]) break;
+        if (S.excl[i]) { prof.push(NaN); exc++; } else prof.push(S.lum[i]);
+      }
+      var lenPx = prof.length;
+      if (lenPx < 24) { rays.push({ deg: Math.round(th * 180 / Math.PI), lenPx: lenPx,
+        radiusMm: r2(lenPx * mmPerPx), lenMm: 0, rings: 0, densityPerMm: 0, conf: 0, excFrac: 1 }); continue; }
+
+      // 排除髓心糊區與樹皮外緣
+      var a = Math.floor(lenPx * 0.12), b = Math.floor(lenPx * 0.97);
+      var seg = interpolateNaN(prof.slice(a, b));
+      var L = seg.length;
+      if (L < 20) { rays.push({ deg: Math.round(th * 180 / Math.PI), lenPx: lenPx,
+        radiusMm: r2(lenPx * mmPerPx), lenMm: 0, rings: 0, densityPerMm: 0, conf: 0, excFrac: exc / lenPx }); continue; }
+
+      // 去趨勢用「中位數濾波」而非移動平均。
+      // 心材／邊材交界是一個約 40 灰階的階梯；移動平均會把這個階梯抹成一道
+      // 跨越整個視窗的斜坡殘差，其振幅遠大於年輪本身，faint 的年輪就被埋掉了。
+      // 中位數濾波保留階梯（留在 trend 裡被減掉），只讓年輪振盪留在 sig。
+      var win = Math.max(7, Math.round(L * 0.07)) | 1;
+      var trend = medFilt(seg, win);
+      var sig = new Float64Array(L);
+      for (var m = 0; m < L; m++) sig[m] = seg[m] - trend[m];
+      sig = smooth3(sig);
+
+      // ── 週期性以自相關量測，不用過零計數 ──
+      // 過零計數會被雜訊直接餵飽：雜訊自己就會製造大量交越，
+      // 於是「推得的年輪週期」跟著雜訊跑，用它去做帶通濾波等於用雜訊驗證雜訊。
+      // 自相關則是雜訊偽造不了的：白雜訊在任何非零延遲都沒有峰值。
+      var sd = std(sig);
+      var ac = autocorrPeak(sig, L, lagHint);
+      var rings = ac.lag > 0 ? L / ac.lag : 0;
+      var lenMm = L * mmPerPx;
+      var densityPerMm = (ac.lag > 0 && mmPerPx > 0) ? 1 / (ac.lag * mmPerPx) : 0;
+      var excFrac = exc / lenPx;
+
+      var conf = clamp((ac.r - 0.15) / 0.45, 0, 1)       // 週期性強度（自相關峰值）
+               * clamp(sd / 4, 0, 1)                     // 環狀訊號振幅
+               * (1 - clamp(excFrac, 0, 1))              // 被遮罩比例
+               * clamp(L / 60, 0, 1);                    // 有效取樣長度
+
+      rays.push({
+        deg: Math.round(th * 180 / Math.PI), lenPx: lenPx,
+        // radiusMm＝從髓心到樹皮的完整半徑（畫輪廓、標尺寸用）
+        // lenMm  ＝實際參與年輪計算的區段長度（已裁掉內 12%、外 3%）
+        // 兩者差約 15%，混用會讓指紋圖上的尺寸標示是錯的
+        radiusMm: r2(lenPx * mmPerPx), lenMm: r2(lenMm),
+        rings: r2(rings), densityPerMm: r3(densityPerMm),
+        period_px: r2(ac.lag), periodicity: r3(ac.r), contrast: r2(sd),
+        conf: r3(conf), excFrac: r3(excFrac)
+      });
+    }
+    S.rays = rays; S._raysKey = null;   // 單遍結果不進兩遍快取
+    return rays;
+  }
+
+  /**
+   * 一維訊號的自相關主峰。
+   * 回傳 {lag, r}：lag = 最可能的年輪週期（px），r = 該延遲的正規化自相關值（0–1）。
+   * 純正弦 r≈0.9；白雜訊 r≈0.1–0.2。這個差距就是「真的有年輪」與「只是雜訊」的分界。
+   */
+  function autocorrPeak(sig, L, hint) {
+    var m = 0, i;
+    for (i = 0; i < L; i++) m += sig[i];
+    m /= L;
+    var v = 0;
+    for (i = 0; i < L; i++) { var dv = sig[i] - m; v += dv * dv; }
+    if (v <= 1e-9) return { lag: 0, r: 0 };
+    var norm = v / L;
+
+    var kmin = 3, kmax = Math.floor(L / 3);
+    // 有尺度提示時把搜尋窗夾在提示值附近，倍頻根本進不了候選
+    if (hint > 0) {
+      kmin = Math.max(3, Math.floor(hint * 0.6));
+      kmax = Math.min(kmax, Math.ceil(hint * 1.7));
+    }
+    if (kmax <= kmin) return { lag: 0, r: 0 };
+    var rs = new Float64Array(kmax + 1);
+    for (var k = kmin; k <= kmax; k++) {
+      var s = 0;
+      for (i = 0; i < L - k; i++) s += (sig[i] - m) * (sig[i + k] - m);
+      rs[k] = (s / (L - k)) / norm;
+    }
+    // 先跳過 k 很小時的單調衰減段（殘留趨勢造成），從訊號開始回升處才算起。
+    // 不跳過的話，最大值永遠落在 kmin，找不到真正的週期。
+    var kstart = kmin;
+    while (kstart < kmax && rs[kstart + 1] < rs[kstart]) kstart++;
+    if (kstart >= kmax - 1) return { lag: 0, r: 0 };
+
+    var maxR = 0;
+    for (var k2 = kstart; k2 <= kmax; k2++) if (rs[k2] > maxR) maxR = rs[k2];
+    if (maxR <= 0) return { lag: 0, r: 0 };
+
+    // 先取達到主峰 90% 的第一個局部極大
+    var best = 0;
+    for (var k3 = kstart + 1; k3 < kmax; k3++) {
+      if (rs[k3] >= 0.9 * maxR && rs[k3] >= rs[k3 - 1] && rs[k3] >= rs[k3 + 1]) { best = k3; break; }
+    }
+    if (!best) return { lag: 0, r: 0 };
+
+    // 倍頻修正（pitch detection 的 octave error）：
+    // 週期訊號的自相關在「每一個週期的整數倍」都有峰值，而緩慢的振幅包絡
+    // 常讓某個倍頻峰略高於基頻峰。不修正的話，48 條射線裡會有三分之一
+    // 抓到 2 倍、3 倍甚至 5 倍的週期，年輪密度直接少算好幾倍。
+    // 作法：往下找 best/2、best/3 … 若那裡的峰值仍有 best 的 80%，就採更短的那個。
+    for (var div = 6; div >= 2; div--) {
+      var cand = Math.round(best / div);
+      if (cand < kmin) continue;
+      var localBest = 0, localLag = 0;
+      for (var dk = -1; dk <= 1; dk++) {
+        var kk = cand + dk;
+        if (kk >= kmin && kk <= kmax && rs[kk] > localBest) { localBest = rs[kk]; localLag = kk; }
+      }
+      if (localLag && localBest >= 0.80 * rs[best]) { best = localLag; break; }
+    }
+    return { lag: best, r: clamp(rs[best], 0, 1) };
+  }
+
+  function interpolateNaN(arr) {
+    var out = arr.slice(), n = out.length, last = null;
+    for (var i = 0; i < n; i++) {
+      if (!isNaN(out[i])) {
+        if (last !== null && i - last > 1) {
+          for (var j = last + 1; j < i; j++) out[j] = out[last] + (out[i] - out[last]) * (j - last) / (i - last);
+        }
+        last = i;
+      }
+    }
+    // 頭尾補值
+    var first = out.findIndex(function (v) { return !isNaN(v); });
+    if (first > 0) for (var k = 0; k < first; k++) out[k] = out[first];
+    if (last !== null) for (var m = last + 1; m < n; m++) out[m] = out[last];
+    return out.map(function (v) { return isNaN(v) ? 0 : v; });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // Step 8：彙整特徵向量
+  // ─────────────────────────────────────────────────────────────
+  /**
+   * 由粗到細兩遍：第一遍讓每條射線各自找週期，取中位數當作「這片的年輪尺度」；
+   * 第二遍把搜尋窗夾在該尺度附近。只做一遍的話，約三分之一的方向會鎖到倍頻，
+   * 密度少算 2–5 倍，方向性也會被打亂。
+   * 結果連同 mmPerPx 一起快取：同一張影像、同一個比例尺只算一次。
+   */
+  function ringsTwoPass(mmPerPx) {
+    if (S.rays && S._raysKey === mmPerPx) return S.rays;
+    var pass1 = radial(mmPerPx);
+    var lags = pass1.filter(function (r) { return r.conf >= 0.3 && r.period_px > 0; })
+                    .map(function (r) { return r.period_px; });
+    var rays = lags.length >= 8 ? radial(mmPerPx, median(lags)) : pass1;
+    S.rays = rays; S._raysKey = mmPerPx;
+    return rays;
+  }
+
+  function compute(meta) {
+    var g = S.geom;
+    if (!g) throw new Error('尚未完成輪廓分割');
+
+    // 比例尺兩種來源：
+    //  a) 攝影台校正常數 mm_per_px —— 相機固定、垂直向下，一次校正全場通用（工作坊主用）
+    //  b) 人工實測直徑 —— 設計團隊事後補建檔時使用
+    var mmPerPx;
+    if (Number(meta.mm_per_px) > 0) {
+      mmPerPx = Number(meta.mm_per_px);
+    } else if (Number(meta.diameter_mm) > 0) {
+      mmPerPx = Number(meta.diameter_mm) / g.majorPx;
+    } else {
+      throw new Error('缺少比例尺：需要攝影台校正值 mm_per_px 或人工實測直徑');
+    }
+
+    if (!S.heart) heartwood();          // 分析畫面已做過就不再算一次
+
+    // 鋸痕：直線狀切削痕會被誤讀成年輪，先偵測再遮罩（規格 AT-03）
+    var saw = [];
+    if (meta.autoMaskSaw !== false) {
+      saw = detectSawMarks();
+      if (saw.length) maskSawMarks(meta.sawHalfWidth || 7);
+    }
+
+    var cands = S.pithCands || pithCandidates();
+    if (!S.pith) autoPith();
+
+    // 分析畫面已經在「量年輪」那一步跑過同一組運算，這裡直接沿用，
+    // 不要再算一次（兩遍 radial 在 900px 工作解析度上約 0.6–1.2 秒，
+    // 重複一次就等於白白多凍住畫面一秒）。
+    var rays = ringsTwoPass(mmPerPx);
+
+    var confs = rays.map(function (r) { return r.conf; });
+    var dens = rays.filter(function (r) { return r.conf >= 0.3; }).map(function (r) { return r.densityPerMm; });
+    var medDens = dens.length ? median(dens) : 0;
+
+    // ── 生長圈數估計（相對年齡用）──
+    // 每條射線：髓心到樹皮的完整半徑 ÷ 該方向的年輪週期 ＝ 該方向數得到的圈數。
+    // 取有把握方向的中位數當估計值，四分位距當範圍。這是「圈數」不是「樹齡」：
+    // 樟木有偽輪與缺輪，斜切也會把圈拉寬，規格 1.3 明定不得詮釋為精準樹齡；
+    // 但同一棵樹的木片彼此比較「誰的圈數多」是站得住的相對排序。
+    var cnts = rays.filter(function (r) { return r.conf >= 0.3 && r.period_px > 0; })
+                   .map(function (r) { return r.lenPx / r.period_px; })
+                   .sort(function (a, b) { return a - b; });
+    var ringCount = cnts.length ? median(cnts) : 0;
+    var ringLow = cnts.length ? cnts[Math.floor(cnts.length * 0.25)] : 0;
+    var ringHigh = cnts.length ? cnts[Math.floor(cnts.length * 0.75)] : 0;
+    var ringCountConf = cnts.length
+      ? clamp((cnts.length / RAYS) * (rays.filter(function (r) { return r.conf >= 0.3; })
+          .reduce(function (a, r) { return a + r.conf; }, 0) / cnts.length), 0, 1)
+      : 0;
+
+    // 方向性：以軸向（2θ）向量和表示，避免 0°／180° 被視為相反
+    var vx = 0, vy = 0, wsum = 0;
+    rays.forEach(function (r) {
+      var w = r.densityPerMm * r.conf;
+      var t2 = 2 * r.deg * Math.PI / 180;
+      vx += w * Math.cos(t2); vy += w * Math.sin(t2); wsum += w;
+    });
+    var dirStrength = wsum > 0 ? Math.sqrt(vx * vx + vy * vy) / wsum : 0;
+    var dirDeg = ((0.5 * Math.atan2(vy, vx) * 180 / Math.PI) + 180) % 180;
+
+    // 裂縫／人工痕比例
+    var exclCount = 0, maskCount = 0;
+    for (var i = 0; i < S.w * S.h; i++) { if (S.mask[i]) { maskCount++; if (S.excl[i]) exclCount++; } }
+    var crackRatio = maskCount ? exclCount / maskCount : 0;
+
+    var completeness = rays.filter(function (r) { return r.conf >= 0.35; }).length / rays.length;
+
+    var eccPx = Math.hypot(S.pith.x - g.cx, S.pith.y - g.cy);
+    var eccentricity = clamp(eccPx / g.eqRadiusPx, 0, 1);
+
+    // 分割品質：面積合理性、輪廓平滑度、是否被畫面邊緣裁切
+    var q1 = (g.maskFrac > 0.06 && g.maskFrac < 0.85) ? 1 : 0.4;
+    var q2 = clamp(1 - g.irregularity * 1.6, 0, 1);
+    var q3 = clamp(1 - g.borderTouchFrac * 4, 0, 1);
+    var segQuality = clamp(0.3 * q1 + 0.3 * q2 + 0.4 * q3, 0, 1);
+
+    // ── 分項信心（規格 4.1 第 7 點：各特徵分開給信心值，不只一個總分）──
+    var meanConf = mean(confs);
+
+    // 幾何：分割品質即幾何可信度
+    var confGeometry = segQuality;
+
+    // 心材：兩群分離度不足或比例極端時不可信
+    var confHeartwood = S.heartReliable
+      ? clamp(0.45 + 0.55 * clamp(Math.abs(S.heartRatio - 0.5) < 0.45 ? 1 : 0.6, 0, 1), 0, 1) * segQuality
+      : 0.25 * segQuality;
+
+    // 髓心：最佳候選與次佳候選的分數差距越大，越能說「就是這裡」
+    var confPith;
+    if (S.pith.source === 'manual') {
+      confPith = 0.95;                                   // 參與者親手指的，不再由 AI 猜
+    } else if (cands.length >= 2 && cands[0].score > 0) {
+      var margin = (cands[0].score - cands[1].score) / cands[0].score;
+      confPith = clamp(0.35 + 0.45 * clamp(margin / 0.25, 0, 1) + 0.2 * clamp(cands[0].score / 0.6, 0, 1), 0, 1);
+    } else {
+      confPith = clamp(0.3 + 0.5 * clamp((cands[0] ? cands[0].score : 0) / 0.6, 0, 1), 0, 1);
+    }
+
+    // 年輪：乘積式，分割失敗或訊號不可信時必須真的塌下來，
+    // 不能被其他項目的常數分數撐住（規格 8.3：低信心不得輸出虛假精細資料）
+    var signalScore = 0.6 * meanConf + 0.4 * completeness;
+    var confRings = clamp(segQuality * (0.25 + 0.75 * signalScore) * (1 - 0.5 * crackRatio), 0, 1);
+    confRings *= (0.7 + 0.3 * confPith);                 // 髓心不準，年輪分析就不準
+
+    // 總分只是分流用；介面必須同時顯示四個分項。
+    // 加權平均再加一道上限：總信心不得超過「年輪信心所能支撐的程度」。
+    // 沒有這道上限，輪廓與心材各拿滿分就能把一張年輪根本看不見的照片撐到 0.69，
+    // 而光參數幾乎全由年輪特徵驅動 —— 那個 0.69 是假的。
+    var weighted = 0.20 * confGeometry + 0.15 * confHeartwood + 0.25 * confPith + 0.40 * confRings;
+    var confidence = clamp(Math.min(weighted, 0.15 + 0.85 * confRings), 0, 1);
+
+    var out = {
+      slice_id: meta.slice_id, face: meta.face || 'A', photo_id: meta.photo_id || '',
+      scan_id: meta.scan_id || '', session_id: meta.session_id || '',
+      source: S.pith.source === 'manual' || S.circles.length ? 'ai+human' : 'ai',
+      conf_geometry: confGeometry, conf_heartwood: confHeartwood,
+      conf_pith: confPith, conf_rings: confRings,
+      band: confidence >= 0.80 ? 'confirm' : (confidence >= 0.50 ? 'review_required' : 'degraded'),
+      pith_candidates: (cands || []).map(function (c) {
+        return { x_norm: r3(c.x / S.w), y_norm: r3(c.y / S.h),
+                 score: c.score, source: c.source, label: c.label };
+      }),
+      artifacts: {
+        saw_lines: saw,
+        masks: S.circles.length,
+        auto_specular: true,
+        excluded_area_ratio: r3(crackRatio)
+      },
+      mm_per_px: mmPerPx,
+      diameter_mm: r2(g.majorPx * mmPerPx),
+      diameter_min_mm: r2(g.minorPx * mmPerPx),
+      pith_x_norm: S.pith.x / S.w, pith_y_norm: S.pith.y / S.h, pith_source: S.pith.source,
+      heartwood_ratio: S.heartRatio || 0,
+      eccentricity: eccentricity,
+      ring_density: clamp((medDens - 0.08) / (1.0 - 0.08), 0, 1),   // 正規化 0–1 供光參數映射
+      ring_density_raw_per_mm: medDens,
+      ring_count_est: Math.round(ringCount),            // 生長圈數估計（相對年齡排序用，非樹齡）
+      ring_count_low: Math.round(ringLow),
+      ring_count_high: Math.round(ringHigh),
+      ring_count_rays: cnts.length,                     // 參與估計的方向數（滿分 48）
+      ring_count_conf: r3(ringCountConf),
+      // 可靠才講：至少一半方向有把握、且平均信心 ≥ 0.4。
+      // 粗鋸未磨的表面會鎖到鋸痕或凹槽的假週期，算出「5 圈」這種數字——寧可不說。
+      ring_count_reliable: (cnts.length >= RAYS / 2 && ringCountConf >= 0.4 * (cnts.length / RAYS)),
+      directionality_deg: dirDeg, directionality_strength: clamp(dirStrength, 0, 1),
+      ring_completeness: completeness,
+      crack_ratio: crackRatio,
+      seg_quality: segQuality,
+      confidence: confidence,
+      roundness: g.roundness, aspect_ratio: g.aspect, contour_irregularity: g.irregularity,
+      rays: rays,
+      masks: S.circles.map(function (c) {
+        return { x: r3(c.x / S.w), y: r3(c.y / S.h), r: r3(c.r / S.w), kind: c.kind };
+      }),
+      geometry: {
+        area_px: g.areaPx, major_px: r2(g.majorPx), minor_px: r2(g.minorPx),
+        eq_radius_px: r2(g.eqRadiusPx), major_mm: r2(g.majorPx * mmPerPx),
+        minor_mm: r2(g.minorPx * mmPerPx), work_w: S.w, work_h: S.h
+      },
+      params: {
+        analyzer: 'RA-0.2', rays: RAYS, work_px: WORK,
+        bg: S.bg, threshold_norm: r3(S.threshold),
+        heart_reliable: S.heartReliable,
+        scale_source: Number(meta.mm_per_px) > 0 ? 'station_calibration' : 'manual_diameter',
+        saw_masked: !!S.sawMasked
+      },
+      quality: meta.quality || null
+    };
+    S.result = out;
+    return out;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 疊圖繪製
+  // ─────────────────────────────────────────────────────────────
+  /**
+   * 疊圖繪製。v0.2 支援規格 2.3 要求的圖層切換：
+   * opt = {original, contour, heartwood, pith, rings, cracks, groove}
+   * 舊版參數 showHeart／showContour／showRays 仍可用。
+   */
+  function render(canvas, img, opt) {
+    opt = opt || {};
+    if (opt.showHeart !== undefined)   opt.heartwood = opt.showHeart;
+    if (opt.showContour !== undefined) opt.contour = opt.showContour;
+    if (opt.showRays !== undefined)    opt.rings = opt.showRays;
+
+    canvas.width = S.w; canvas.height = S.h;
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, S.w, S.h);
+
+    if (opt.heartwood || opt.cracks) {
+      var im = ctx.getImageData(0, 0, S.w, S.h), d = im.data;
+      for (var i = 0; i < S.w * S.h; i++) {
+        if (opt.heartwood && S.heart && S.heart[i]) {
+          d[i * 4] = Math.min(255, d[i * 4] + 45); d[i * 4 + 2] = Math.max(0, d[i * 4 + 2] - 30);
+        }
+        if (opt.cracks && S.excl[i]) { d[i * 4] = 40; d[i * 4 + 1] = 40; d[i * 4 + 2] = 40; }
+        if (!S.mask[i]) { d[i * 4] *= 0.25; d[i * 4 + 1] *= 0.25; d[i * 4 + 2] *= 0.25; }
+      }
+      ctx.putImageData(im, 0, 0);
+    }
+
+    if (opt.groove && S.sawLines && S.sawLines.length) {
+      ctx.strokeStyle = 'rgba(255,120,80,.75)'; ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 5]);
+      S.sawLines.forEach(function (L) {
+        var t = L.theta_deg * Math.PI / 180, ct = Math.cos(t), st2 = Math.sin(t);
+        var x0 = ct * L.rho, y0 = st2 * L.rho, D = Math.max(S.w, S.h);
+        ctx.beginPath();
+        ctx.moveTo(x0 - st2 * D, y0 + ct * D);
+        ctx.lineTo(x0 + st2 * D, y0 - ct * D);
+        ctx.stroke();
+      });
+      ctx.setLineDash([]);
+    }
+
+    if (opt.contour && S.mask) {
+      ctx.strokeStyle = '#5ee6a8'; ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      for (var y = 1; y < S.h - 1; y++) for (var x = 1; x < S.w - 1; x++) {
+        var j = y * S.w + x;
+        if (S.mask[j] && (!S.mask[j - 1] || !S.mask[j + 1] || !S.mask[j - S.w] || !S.mask[j + S.w])) {
+          ctx.moveTo(x, y); ctx.lineTo(x + 1, y);
+        }
+      }
+      ctx.stroke();
+    }
+
+    if (opt.rings && S.rays && S.pith) {
+      S.rays.forEach(function (r) {
+        var th = r.deg * Math.PI / 180;
+        ctx.strokeStyle = 'rgba(255,200,80,' + (0.18 + r.conf * 0.6) + ')';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(S.pith.x, S.pith.y);
+        ctx.lineTo(S.pith.x + Math.cos(th) * r.lenPx, S.pith.y + Math.sin(th) * r.lenPx);
+        ctx.stroke();
+      });
+    }
+
+    S.circles.forEach(function (c) {
+      ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); ctx.stroke();
+    });
+
+    if (opt.pith !== false && S.geom) {
+      ctx.strokeStyle = 'rgba(120,180,255,.9)'; ctx.lineWidth = 1.5;
+      cross(ctx, S.geom.cx, S.geom.cy, 8);
+    }
+    // 未被選中的髓心候選：畫成空心小圈，讓參與者知道 AI 還有別的猜測
+    if (opt.pith !== false && S.pithCands) {
+      S.pithCands.forEach(function (c, i) {
+        if (S.pith && Math.hypot(c.x - S.pith.x, c.y - S.pith.y) < 4) return;
+        ctx.strokeStyle = 'rgba(255,255,255,.42)'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(c.x, c.y, 8, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,.55)';
+        ctx.font = '11px monospace';
+        ctx.fillText(String(i + 1), c.x + 11, c.y + 4);
+      });
+    }
+    if (opt.pith !== false && S.pith) {
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(S.pith.x, S.pith.y, 11, 0, Math.PI * 2); ctx.stroke();
+      cross(ctx, S.pith.x, S.pith.y, 16);
+    }
+  }
+
+  function cross(ctx, x, y, s) {
+    ctx.beginPath();
+    ctx.moveTo(x - s, y); ctx.lineTo(x + s, y);
+    ctx.moveTo(x, y - s); ctx.lineTo(x, y + s);
+    ctx.stroke();
+  }
+
+  // ── 小工具 ────────────────────────────────────────────────────
+  function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+  function median(a) { var s = a.slice().sort(function (x, y) { return x - y; }); var n = s.length; return n ? (n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2) : 0; }
+  function mean(a) { return a.length ? a.reduce(function (x, y) { return x + y; }, 0) / a.length : 0; }
+  function std(a) { var m = 0, n = a.length; for (var i = 0; i < n; i++) m += a[i]; m /= n; var v = 0; for (var j = 0; j < n; j++) v += (a[j] - m) * (a[j] - m); return Math.sqrt(v / Math.max(1, n)); }
+  /** 置中中位數濾波：邊緣保留型，用來估計「不含年輪振盪」的基底亮度。 */
+  function medFilt(a, w) {
+    var n = a.length, h = (w / 2) | 0, out = new Float64Array(n), buf = [];
+    for (var i = 0; i < n; i++) {
+      var lo = i - h < 0 ? 0 : i - h;
+      var hi = i + h > n - 1 ? n - 1 : i + h;
+      buf.length = 0;
+      for (var j = lo; j <= hi; j++) buf.push(a[j]);
+      buf.sort(function (x, y) { return x - y; });
+      var m = buf.length;
+      out[i] = m % 2 ? buf[(m - 1) / 2] : (buf[m / 2 - 1] + buf[m / 2]) / 2;
+    }
+    return out;
+  }
+
+  /** 置中移動平均，邊界以可用樣本數平均。
+   *  必須是「置中」的：若輸出被平移半個視窗，去趨勢後會留下大量低頻殘差，
+   *  自相關會被那個殘差主宰而完全找不到年輪週期。 */
+  function movAvg(a, w) {
+    var n = a.length, h = (w / 2) | 0;
+    var ps = new Float64Array(n + 1), out = new Float64Array(n);
+    for (var i = 0; i < n; i++) ps[i + 1] = ps[i] + a[i];
+    for (var j = 0; j < n; j++) {
+      var lo = j - h < 0 ? 0 : j - h;
+      var hi = j + h > n - 1 ? n - 1 : j + h;
+      out[j] = (ps[hi + 1] - ps[lo]) / (hi - lo + 1);
+    }
+    return out;
+  }
+  function smooth3(a) { var n = a.length, o = new Float64Array(n); for (var i = 0; i < n; i++) { var p = a[Math.max(0, i - 1)], c = a[i], nx = a[Math.min(n - 1, i + 1)]; o[i] = (p + 2 * c + nx) / 4; } return o; }
+  function r2(v) { return Math.round(v * 100) / 100; }
+  function r3(v) { return Math.round(v * 1000) / 1000; }
+
+  return {
+    load: load, segment: segment, heartwood: heartwood,
+    autoPith: autoPith, setPith: setPith,
+    addCircle: addCircle, popCircle: popCircle, clearCircles: clearCircles,
+    suggestGroove: suggestGroove,
+    radial: radial, rings: ringsTwoPass, compute: compute, render: render,
+    // v0.2
+    qualityCheck: qualityCheck,
+    pithCandidates: pithCandidates,
+    detectSawMarks: detectSawMarks, maskSawMarks: maskSawMarks,
+    version: 'RA-0.2',
+    state: function () { return S; }
+  };
+})();
+</script>
+
+<div id="gtRoot">
+<style>
+  #gtRoot{--bg:#111210;--bg2:#181a17;--bg3:#202320;--line:#2e322c;--line2:#3d423a;
+    --tx:#e8e6e0;--tx2:#9a9c94;--tx3:#63665e;--wood:#c8874a;--ok:#5ee6a8;--warn:#e8b84b;--err:#ff6b6b;
+    background:var(--bg);color:var(--tx);min-height:100vh;
+    font:15px/1.6 "Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif}
+  #gtRoot *{box-sizing:border-box}
+  #gtRoot header{padding:14px 18px;border-bottom:1px solid var(--line)}
+  #gtRoot h1{margin:0;font-size:16px;letter-spacing:.05em}
+  #gtRoot .sub{font-size:11px;color:var(--tx3);letter-spacing:.12em;text-transform:uppercase}
+  #gtWrap{display:flex;gap:14px;padding:14px;align-items:flex-start;flex-wrap:wrap}
+  /* 照片釘在畫面上：右欄往下捲參數時，左邊的圖跟著留在原位，改什麼立刻看得到 */
+  #gtStage{flex:1 1 520px;min-width:320px;background:#000;border:1px solid var(--line);border-radius:10px;overflow:hidden;position:sticky;top:14px;align-self:flex-start}
+  #gtCv{display:block;max-width:100%;max-height:calc(100vh - 90px);width:auto;height:auto;margin:0 auto;cursor:crosshair}
+  @media (max-width:900px){ #gtStage{position:static} #gtCv{max-height:none;width:100%} }
+  #gtSide{flex:0 0 320px;display:flex;flex-direction:column;gap:10px}
+  .gtCard{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:12px}
+  .gtCard h2{margin:0 0 8px;font-size:12.5px;color:var(--tx2);letter-spacing:.08em}
+  #gtRoot label{display:block;font-size:11.5px;color:var(--tx2);margin:8px 0 3px}
+  #gtRoot input[type=number],#gtRoot input[type=text],#gtRoot select{width:100%;background:var(--bg3);border:1px solid var(--line2);
+    color:var(--tx);border-radius:7px;padding:8px 10px;font-size:14px;font-family:inherit}
+  #gtRoot input[type=range]{width:100%}
+  #gtRoot .val{float:right;color:var(--wood);font-family:Menlo,Consolas,monospace;font-size:12px}
+  #gtRoot button{background:var(--bg3);border:1px solid var(--line2);color:var(--tx);border-radius:8px;
+    padding:10px 12px;font-size:13.5px;font-family:inherit;cursor:pointer;width:100%;margin-top:6px}
+  #gtRoot button.pri{background:var(--wood);border-color:var(--wood);color:#1a1208;font-weight:600}
+  #gtRoot button:disabled{opacity:.4;cursor:not-allowed}
+  #gtInfo{font-size:12.5px;line-height:1.7;color:var(--tx2)}
+  #gtInfo b{color:var(--tx)}
+  #gtInfo .bad{color:var(--err)} #gtInfo .good{color:var(--ok)}
+  .gtHint{font-size:11.5px;color:var(--tx3);line-height:1.6;margin-top:6px}
+</style>
+
+<header>
+  <h1>年輪凹槽曲線工具</h1>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r11-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
+</header>
+
+<div id="gtWrap">
+  <div id="gtStage">
+    <canvas id="gtCv" width="900" height="600"></canvas>
+  </div>
+
+  <div id="gtSide">
+    <div class="gtCard">
+      <h2>1｜照片與比例尺</h2>
+      <button class="pri" onclick="document.getElementById('gtFile').click()">選擇木片照片</button>
+      <input type="file" id="gtFile" accept="image/*" style="display:none">
+      <label>這片木片的實測<b>最長</b>直徑（mm）＊卡尺量</label>
+      <input type="number" id="gtDia" value="150" min="50" max="400" step="0.5">
+      <label>實測<b>最短</b>直徑（mm，選填＊用來檢查斜拍）<span class="val" id="vDiaMin">—</span></label>
+      <input type="number" id="gtDiaMin" placeholder="選填" min="30" max="400" step="0.5">
+      <div class="gtHint">輸入最長直徑後，灰字自動顯示<b>照片換算的短軸</b>；卡尺實測後填進來，系統會比對兩者檢查是否斜拍。</div>
+      <label>木片編號（用於檔名，可空）</label>
+      <input type="text" id="gtId" placeholder="TR-U00-S004">
+      <div class="gtHint">橢圓木片也可以：比例尺只用<b>最長直徑</b>；凹槽會沿木片形狀走成橢圓。最短直徑選填——填了會拿來核對照片是否斜拍。照片務必<b>正上方垂直拍</b>。<b>點</b>影像空白處＝修正髓心；<b>抓住曲線拖曳</b>＝手動修形（放手後刀路自動更新；調整任何滑桿會重新起稿、覆蓋手動修形）。</div>
+    </div>
+
+    <div class="gtCard">
+      <h2>2｜凹槽參數</h2>
+      <button id="btnRings" onclick="GT.detectAllRings()" disabled>偵測全部年輪（再用直徑挑選）</button>
+      <div class="gtHint" id="ringHint" style="display:none">年輪模式：淡黃線＝偵測到的每一條年輪。<b>移動直徑滑桿</b>會自動鎖到最接近的一條；也可以<b>直接點某條年輪</b>選它。跟隨強度／帶寬在此模式不使用；平滑度照常有效。</div>
+      <label>目標凹槽直徑 <span class="val" id="vR0">70 mm</span></label>
+      <input type="range" id="gtR0" min="50" max="100" value="70" step="1">
+      <label>容許帶寬（曲線可偏離目標半徑的範圍）<span class="val" id="vBand">±8 mm</span></label>
+      <input type="range" id="gtBand" min="3" max="15" value="8" step="1">
+      <label>跟隨年輪紋理的強度 <span class="val" id="vFollow">70%</span></label>
+      <input type="range" id="gtFollow" min="0" max="100" value="70" step="5">
+      <label>平滑度（愈高愈圓，銑刀愈好走；愈低愈貼年輪細節）<span class="val" id="vSmooth">100%</span></label>
+      <input type="range" id="gtSmooth" min="0" max="100" value="100" step="5">
+      <label>凹槽寬度（mm）</label>
+      <input type="number" id="gtW" value="6" min="1" max="30" step="0.5">
+      <label>銑刀直徑（mm）</label>
+      <input type="number" id="gtBit" value="4" min="1" max="20" step="0.5">
+      <label>回中凹槽（燈條走線從圈回到髓心）</label>
+      <select id="gtFeed">
+        <option value="">無</option>
+        <option value="up" selected>上（照片方向）</option>
+        <option value="down">下</option>
+        <option value="left">左</option>
+        <option value="right">右</option>
+      </select>
+      <div class="gtHint">槽寬＞刀徑時自動產生<b>多條刀路</b>：6mm 槽用 4mm 刀＝兩條曲線（中心線各往內、外偏 1mm），CNC 各走一圈就切出 6mm 寬。</div>
+    </div>
+
+    <div class="gtCard">
+      <h2>3｜結果與匯出</h2>
+      <div id="gtInfo">請先選擇照片。</div>
+      <button class="pri" id="btnSvg" onclick="GT.exportSVG()" disabled>匯出 SVG（mm）</button>
+      <button id="btnDxf" onclick="GT.exportDXF()" disabled>匯出 DXF R12（mm）</button>
+      <button id="btnPng" onclick="GT.exportPNG()" disabled>匯出對照圖 PNG</button>
+      <div class="gtHint">圖層：<b>GROOVE_IN／GROOVE_OUT</b>（刀具中心刀路，各走一圈；槽寬＝刀徑時只有一條 <b>GROOVE</b>）、<b>FEED_A／FEED_B</b>（回中凹槽的直線刀路，開放線段）、<b>OUTLINE</b>（木片外輪廓，先在犧牲板銑定位凹穴）、<b>PITH</b>（髓心十字）、<b>REG_FRAME</b>（對位框：以髓心為中心的對稱矩形——Vectric 匯入 SVG 會拿圖形外框置中，有這個框，置中後髓心必在版面正中央；<b>不要對它算刀路</b>）。座標原點＝髓心，單位 mm，Y 向上。<b>進 Vectric 建議用 DXF</b>：DXF 保留絕對座標，髓心直接落在 0,0。</div>
+    </div>
+
+    <div class="gtCard">
+      <h2>4｜G-code（Carvera Air 直接切）</h2>
+      <label>凹槽深度（mm）</label>
+      <input type="number" id="gtDepth" value="6" min="0.5" max="20" step="0.5">
+      <label>每層下刀（mm）</label>
+      <input type="number" id="gtStepDown" value="2" min="0.5" max="6" step="0.5">
+      <label>進給速度（mm/min）</label>
+      <input type="number" id="gtFxy" value="800" min="100" max="3000" step="50">
+      <label>下刀速度（mm/min）</label>
+      <input type="number" id="gtFz" value="300" min="50" max="1000" step="50">
+      <label>安全高度（mm）</label>
+      <input type="number" id="gtSafe" value="5" min="1" max="30" step="1">
+      <label>主軸轉速（RPM）</label>
+      <input type="number" id="gtRpm" value="10000" min="1000" max="15000" step="500">
+      <button class="pri" id="btnNc" onclick="GT.exportGcode()" disabled>匯出 G-code（.nc · Carvera Air）</button>
+      <button id="btnTap" onclick="GT.exportTap()" disabled>匯出 Tap（.tap · 三軸 6090／Mach3）</button>
+      <div id="gtGInfo" class="gtHint"></div>
+      <div class="gtHint">只含<b>凹槽（GROOVE）＋回中槽（FEED）</b>的切割路徑，沒有外輪廓。原點＝髓心 X0Y0，Z0＝木片上表面。機器上：刀尖對到木片上的 X 記號、輕觸表面，設 XYZ 工作零點後執行。<br><b>.nc</b>＝Carvera Air（Smoothieware）；<b>.tap</b>＝台灣三軸 6090（Mach3，括號註解＋% 包夾＋M30）。兩檔刀路完全相同，只差機器方言。</div>
+    </div>
+
+    <div class="gtCard">
+      <h2>5｜居民手繪雕刻（bonus，平時不用）</h2>
+      <button onclick="document.getElementById('gtEFile').click()">上傳手繪圖照片</button>
+      <input type="file" id="gtEFile" accept="image/*" style="display:none">
+      <div id="gtEStatus" class="gtHint">白紙黑筆的畫，拍正、光線均勻。上傳後自動抽出<b>每一筆的中心線</b>（一筆＝一條刀路，不是描邊）。</div>
+      <label>雕刻圖寬度（mm）<span class="val" id="vEW">60 mm</span></label>
+      <input type="range" id="gtEW" min="20" max="150" value="60" step="2">
+      <label>位置 X（mm，＋右）<span class="val" id="vEX">0</span></label>
+      <input type="range" id="gtEX" min="-80" max="80" value="0" step="1">
+      <label>位置 Y（mm，＋上）<span class="val" id="vEY">0</span></label>
+      <input type="range" id="gtEY" min="-80" max="80" value="0" step="1">
+      <label>旋轉（°）<span class="val" id="vERot">0°</span></label>
+      <input type="range" id="gtERot" min="-180" max="180" value="0" step="5">
+      <label>雕刻深度（mm）</label>
+      <input type="number" id="gtEDepth" value="1.5" min="0.3" max="5" step="0.1">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+        <input type="checkbox" id="gtNoGroove" style="width:auto">
+        <span>這片<b>不切年輪凹槽</b>（只做手繪雕刻）</span>
+      </label>
+      <button id="btnEClear" onclick="GT.clearEngraving()" disabled>移除雕刻圖</button>
+      <button class="pri" id="btnENc" onclick="GT.exportEngraveGcode()" disabled>匯出雕刻 G-code（.nc）</button>
+      <div id="gtEInfo" class="gtHint"></div>
+      <div class="gtHint">雕刻線條同時會進 SVG／DXF 的 <b>ENGRAVE</b> 圖層。細線建議換 <b>V 型雕刻刀或 1–2mm 平刀</b>——所以雕刻是獨立的 G-code 檔，換刀後再跑；座標原點同樣是髓心，對同一個 X 記號設零即可，位置就會跟預覽一致。</div>
+    </div>
+
+    <div class="gtCard">
+      <h2>6｜設定檔（存／讀參數）</h2>
+      <label class="chk" style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="gtRemember" style="width:auto" checked>
+        <span>自動記住上次設定（下次開檔沿用）</span>
+      </label>
+      <button id="btnSaveCfg" onclick="GT.saveConfig()">存設定檔（下載 .json）</button>
+      <button onclick="document.getElementById('gtCfgFile').click()">讀設定檔</button>
+      <input type="file" id="gtCfgFile" accept=".json,application/json" style="display:none">
+      <div id="gtCfgInfo" class="gtHint"></div>
+      <div class="gtHint">存的是所有參數（直徑、槽徑、槽寬、刀徑、走線、深度、進給、轉速…）。用途：把您慣用的<b>機器預設</b>存一個檔，每片讀進來就好；或把某片的完整設定留檔備查。木片編號與照片<b>不</b>存進去。</div>
+    </div>
+
+    <div class="gtCard">
+      <h2>7｜記錄到 Sheet（選用）</h2>
+      <label>Sheet 網址（GAS /exec，貼一次即記住）</label>
+      <input type="text" id="gtSheetUrl" placeholder="https://script.google.com/macros/s/…/exec">
+      <label>機台</label>
+      <select id="gtMachine">
+        <option value="Carvera Air">Carvera Air（.nc）</option>
+        <option value="三軸 6090">三軸 6090（.tap／Mach3）</option>
+        <option value="其他">其他</option>
+      </select>
+      <label>備註（選填）</label>
+      <input type="text" id="gtRecNote" placeholder="裂縫、換刀、試切…">
+      <button class="pri" id="btnRec" onclick="GT.recordToSheet()">記錄這片（存尺寸＋可選送 Sheet）</button>
+      <div id="gtRecInfo" class="gtHint"></div>
+      <div id="gtSizeInfo" class="gtHint" style="margin-top:6px;color:var(--ok)"></div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button id="btnSizeCsv" onclick="GT.exportSizes()">匯出尺寸表 CSV</button>
+        <button id="btnSizeClr" onclick="GT.clearSizes()">清空本機紀錄</button>
+      </div>
+      <div class="gtHint">按「記錄這片」就會把 <b>編號＋長軸＋短軸</b> 存進這台電腦的瀏覽器（離線也行）；短軸沒用卡尺量，就自動用<b>照片換算值</b>補上。全部切完，按「匯出尺寸表 CSV」把 200 片的尺寸給我，就能接進亮燈模擬的真實比例。若另外填了 Sheet 網址，會同時送一列完整參數到 Google Sheet。<b>編號必填</b>（當作每片的鑰匙）。</div>
+    </div>
+  </div>
+</div>
+
+<div style="text-align:center;color:#6f685c;font-size:11.5px;padding:22px 0 30px;border-top:1px solid #2b2925;margin-top:8px">Copyright © 2026 CKfablab</div>
+
+<script>
+var GT = (function () {
+  var st = { img: null, mmpp: 0, curve: null, outline: null, prior: null, ready: false };
+  function $(id) { return document.getElementById(id); }
+
+  // ── 參數顯示 ──
+  var binds = [['gtR0','vR0',function(v){return v+' mm';}],['gtBand','vBand',function(v){return '±'+v+' mm';}],
+               ['gtFollow','vFollow',function(v){return v+'%';}],['gtSmooth','vSmooth',function(v){return v+'%';}]];
+  binds.forEach(function (b) {
+    $(b[0]).addEventListener('input', function () { $(b[1]).textContent = b[2](this.value); schedule(); });
+  });
+  $('gtDia').addEventListener('change', function () { if (st.img) { analyze(); } });
+  $('gtDiaMin').addEventListener('change', function () { if (st.img) { schedule(); } });
+  $('gtBit').addEventListener('change', function () { schedule(); });
+  $('gtW').addEventListener('change', function () { schedule(); });
+  $('gtFeed').addEventListener('change', function () { schedule(); });
+  $('gtNoGroove').addEventListener('change', function () { schedule(); });
+  // 切削參數改了就更新時間預估（不用重算曲線，更不用等匯出）
+  ['gtDepth','gtStepDown','gtFxy','gtFz'].forEach(function (id) {
+    $(id).addEventListener('change', function () { if (st.ready && st.curve) report(); updateEngraveEstimate(); });
+  });
+  $('gtEDepth').addEventListener('change', function () { updateEngraveEstimate(); });
+
+  // 拉桿要即時但不能每個事件都重算：合併到停手 120ms 後算一次
+  var timer = null;
+  function schedule() { if (!st.img) return; clearTimeout(timer); timer = setTimeout(recompute, 120); }
+
+  // ── 載入照片 ──
+  $('gtFile').addEventListener('change', function () {
+    var f = this.files && this.files[0]; if (!f) return;
+    info('<span style="color:var(--accent)">讀取照片中…</span>');   // 立刻回饋，避免看起來像當掉
+    // 用 FileReader 讀成 data: 網址，不用 blob: 物件網址——GAS 的 HtmlService
+    // 沙箱 iframe 會封鎖 blob:，導致 onload 永不觸發、照片載不進來（就是「選了照片卻卡住」）。
+    var rd = new FileReader();
+    rd.onerror = function () { info('<span class="bad">讀取照片失敗，請重試或換一張</span>'); };
+    rd.onload = function () {
+      var img = new Image();
+      img.onerror = function () { info('<span class="bad">照片解碼失敗，請換一張</span>'); };
+      img.onload = function () {
+        function go(im) {
+          st.img = im;
+          info('<span style="color:var(--accent)">分析年輪中…（約一兩秒）</span>');
+          // 用 setTimeout 讓「分析中」先畫出來再跑分析。
+          // 不可用 requestAnimationFrame：GAS 的 HtmlService 沙箱 iframe 在啟動／背景時
+          // 會凍結 rAF，callback 永不觸發 → analyze 不跑 → 左邊照片畫不出來（就是那個卡住）。
+          // setTimeout 在沙箱裡照樣會觸發，而且加一道保險：真沒跑到就直接呼叫。
+          var ran = false, run = function () { if (ran) return; ran = true; analyze(); };
+          setTimeout(run, 0); setTimeout(run, 400);
+        }
+        // 統一縮到 2000 長邊：解析度夠、極座標取樣快。縮圖用 canvas；萬一 toDataURL
+        // 也被沙箱擋，就退回用原圖，一樣能跑（只是稍慢），絕不卡死。
+        var sc = Math.min(1, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+        if (sc >= 1) { go(img); return; }
+        try {
+          var c = document.createElement('canvas');
+          c.width = Math.round(img.naturalWidth * sc); c.height = Math.round(img.naturalHeight * sc);
+          c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+          var im2 = new Image();
+          im2.onerror = function () { go(img); };
+          im2.onload = function () { go(im2); };
+          im2.src = c.toDataURL('image/jpeg', 0.92);
+        } catch (e) { go(img); }
+      };
+      img.src = rd.result;   // data: 網址，沙箱可用
+    };
+    rd.readAsDataURL(f);
+  });
+
+  // ── 畫布互動：按在曲線附近＝拖曳修形（雕塑式，局部變形）；按在別處＝設髓心 ──
+  // 演算法起稿之後，最後一哩由人來定：拖著曲線就能把它按到您眼睛選的那條年輪上。
+  var drag = null, dragRAF = false;
+  function cvToImg(cv, e) {
+    var b = cv.getBoundingClientRect();
+    var x = (e.clientX - b.left) * cv.width / b.width;
+    var y = (e.clientY - b.top) * cv.height / b.height;
+    var S = RingAnalyzer.state();
+    return [x * S.w / cv.width, y * S.h / cv.height];
+  }
+  $('gtCv').addEventListener('pointerdown', function (e) {
+    if (!st.ready) return;
+    var p = cvToImg(this, e), S = RingAnalyzer.state();
+    var dx = p[0] - S.pith.x, dy = p[1] - S.pith.y;
+    var r = Math.hypot(dx, dy);
+    var aIdx = ((Math.round(Math.atan2(dy, dx) / (2 * Math.PI) * A) % A) + A) % A;
+    var grabPx = Math.max(12, 4 / st.mmpp);               // 曲線兩側約 4mm 內算「抓到」
+    // 年輪模式：點到別條年輪＝選它（點到目前這條則進入拖曳修形）
+    if (st.ringMode && st.allRings) {
+      var bi = -1, bdd = grabPx;
+      for (var ri2 = 0; ri2 < st.allRings.length; ri2++) {
+        var dd = Math.abs(r - st.allRings[ri2].r[aIdx]);
+        if (dd < bdd) { bdd = dd; bi = ri2; }
+      }
+      if (bi >= 0 && bi !== st.selRing) {
+        $('gtR0').value = Math.round(st.allRings[bi].meanDia);
+        $('vR0').textContent = $('gtR0').value + ' mm';
+        selectRing(bi);
+        return;
+      }
+    }
+    if (st.curve && Math.abs(r - st.curve[aIdx]) < grabPx) {
+      drag = true;
+      this.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    } else {
+      RingAnalyzer.setPith(p[0], p[1]);
+      recompute();
+    }
+  });
+  $('gtCv').addEventListener('pointermove', function (e) {
+    if (!drag || !st.ready) return;
+    var p = cvToImg(this, e), S = RingAnalyzer.state();
+    var dx = p[0] - S.pith.x, dy = p[1] - S.pith.y;
+    var rNew = Math.hypot(dx, dy);
+    var aIdx = ((Math.round(Math.atan2(dy, dx) / (2 * Math.PI) * A) % A) + A) % A;
+    var delta = rNew - st.curve[aIdx];
+    var HW = 30;                                          // 影響範圍 ±30 格＝±15°，餘弦衰減
+    for (var k = -HW; k <= HW; k++) {
+      var wgt = 0.5 * (1 + Math.cos(Math.PI * k / HW));
+      st.curve[(aIdx + k + A) % A] += delta * wgt;
+    }
+    st.edited = true;
+    if (!dragRAF) {                                       // 拖曳中只重畫，放手才重算刀路
+      dragRAF = true;
+      requestAnimationFrame(function () { dragRAF = false; draw(); });
+    }
+  });
+  function endDrag() { if (drag) { drag = null; refresh(); } }
+  $('gtCv').addEventListener('pointerup', endDrag);
+  $('gtCv').addEventListener('pointercancel', endDrag);
+
+  function analyze() {
+    var S;
+    try {
+      RingAnalyzer.load(st.img);
+      var g = RingAnalyzer.segment({});
+      var hw = RingAnalyzer.heartwood();                    // {ratio, ok}
+      st.heartRatio = hw ? hw.ratio : 0;
+      st.heartReliable = hw ? hw.ok : false;
+      RingAnalyzer.pithCandidates(); RingAnalyzer.autoPith();
+      S = RingAnalyzer.state();
+    } catch (e) { info('<span class="bad">分析失敗：' + e.message + '</span>'); return; }
+    st.mmpp = Number($('gtDia').value) / S.geom.majorPx;   // mm / 工作解析度像素
+    // 長軸一定，照片短軸就能換算——自動顯示在短軸欄（灰字）與標籤旁
+    var minorMm = S.geom.minorPx * st.mmpp;
+    $('gtDiaMin').placeholder = minorMm.toFixed(1);
+    st.estMinor = +minorMm.toFixed(1);                     // 照片估算的短軸（記錄用，實測值另存）
+    $('vDiaMin').textContent = '照片≈' + minorMm.toFixed(1) + ' mm';
+    // 灰階照片偵測：整張幾乎無彩度時，墨水遮罩（靠「暗＋無彩度」認黑墨）會把
+    // 所有暗木頭都誤殺——這種圖上乾脆停用墨水遮罩。
+    var cSum = 0, cN = 0;
+    for (var ci = 0; ci < S.w * S.h; ci += 97) {
+      if (!S.mask[ci]) continue;
+      var cq = ci * 4, cR = S.rgba[cq], cG = S.rgba[cq + 1], cB = S.rgba[cq + 2];
+      cSum += Math.max(cR, cG, cB) - Math.min(cR, cG, cB); cN++;
+    }
+    st.grayImg = cN ? (cSum / cN < 8) : false;
+    st.ready = true;
+    st.allRings = null; st.ringMode = false; st.selRing = -1;   // 換照片／改比例尺就重來
+    st.maskFilled = null; st.omask = null; st.cmask = null;                      // 補洞遮罩重算
+    $('btnRings').disabled = false;
+    $('btnRings').textContent = '偵測全部年輪（再用直徑挑選）';
+    $('ringHint').style.display = 'none';
+    recompute();
+  }
+
+  // ── 共用：模型保底＋證據微調 ──
+  // 生物學模型：年輪家族「靠髓心接近圓形、往外逐漸過渡成外輪廓形狀」。
+  // 先生成保證順滑的基底曲線，再只在量得到年輪訊號的角度往暗線輕拉。
+  function lumG(S, x, y) {
+    var xi = x | 0, yi = y | 0;
+    if (xi < 0 || yi < 0 || xi >= S.w || yi >= S.h) return null;
+    var i = yi * S.w + xi;
+    if (!S.mask[i]) return null;
+    var q = i * 4, R2 = S.rgba[q], G2 = S.rgba[q + 1], B2 = S.rgba[q + 2];
+    var mx = Math.max(R2, G2, B2), mn = Math.min(R2, G2, B2);
+    if (!st.grayImg && mx - mn < 32 && S.lum[i] < 100) return null;
+    return S.lum[i];
+  }
+  // 證據微調：searchMm＝往兩側找暗線的範圍，gain＝拉過去的力道（0..1）
+  function nudgeRing(r, searchMm, gain) {
+    var S = RingAnalyzer.state(), px0 = S.pith.x, py0 = S.pith.y;
+    var K = 5, dr = (searchMm / K) / st.mmpp;
+    var offRaw = new Float32Array(A);
+    for (var a = 0; a < A; a += 2) {
+      var th = a * 2 * Math.PI / A, ct = Math.cos(th), sn = Math.sin(th);
+      var vals = [], sum = 0, cnt = 0;
+      for (var k = -K; k <= K; k++) {
+        var v = lumG(S, px0 + ct * (r[a] + k * dr), py0 + sn * (r[a] + k * dr));
+        vals.push(v);
+        if (v !== null) { sum += v; cnt++; }
+      }
+      if (cnt < 8) continue;
+      var mean = sum / cnt, sd = 0;
+      for (var k2 = 0; k2 < vals.length; k2++) if (vals[k2] !== null) sd += (vals[k2] - mean) * (vals[k2] - mean);
+      sd = Math.sqrt(sd / cnt) || 1;
+      var bestK = 0, bestV = 1e9;
+      for (var k3 = -K; k3 <= K; k3++) {
+        if (vals[k3 + K] === null) continue;
+        var sc = (vals[k3 + K] - mean) / sd + Math.abs(k3) * 0.18;
+        if (sc < bestV) { bestV = sc; bestK = k3; }
+      }
+      var contrast = mean - vals[bestK + K];
+      var gradOK = vals[0] !== null && vals[2 * K] !== null && Math.abs(vals[2 * K] - vals[0]) > 10;
+      if (contrast > 3.5 || gradOK) { offRaw[a] = bestK * dr; offRaw[(a + 1) % A] = bestK * dr; }
+    }
+    var off = fourierLP(circMed(offRaw, 9), 8);
+    var out2 = new Float32Array(A);
+    for (var a4 = 0; a4 < A; a4++) out2[a4] = r[a4] + gain * off[a4];
+    return out2;
+  }
+  // 木質部邊界：年輪只存在於木頭裡，樹皮不算。外輪廓常含大塊樹皮
+  // （T06 右側），所以模型的外形錨點要用「木／皮交界」而不是外輪廓。
+  // 做法：木頭亮、樹皮暗——每個角度從外往內走，找到第一段連續（約 2mm）
+  // 亮過門檻的位置就是交界；門檻由「內部木頭亮度」與「近緣亮度」自動決定。
+  function computeWoodBoundary() {
+    var S = RingAnalyzer.state(), px = S.pith.x, py = S.pith.y;
+    var stepR = Math.max(1.5, 0.7 / st.mmpp);              // 取樣間距約 0.7mm
+    var bandN = Math.max(3, Math.round(3.0 / st.mmpp / stepR));   // 比較窗約 3mm
+    var rw = new Float32Array(A);
+    for (var a = 0; a < A; a++) {
+      var out = st.outline[a];
+      var th = a * 2 * Math.PI / A, ct = Math.cos(th), sn = Math.sin(th);
+      // 沿半徑取樣 0.5×outline～outline
+      var r0 = out * 0.5, n = Math.max(8, Math.round((out - r0) / stepR));
+      var vals = new Array(n);
+      for (var i = 0; i < n; i++) {
+        var rr = r0 + i * stepR;
+        vals[i] = lumG(S, px + ct * rr, py + sn * rr);
+      }
+      // 由外往內找第一個「內亮、外暗」的持續階梯（band 平均差 > 12）
+      var found = out * 0.96;
+      for (var j = n - 1 - bandN; j >= bandN; j--) {
+        var si = 0, ci = 0, so = 0, co = 0;
+        for (var k = 1; k <= bandN; k++) {
+          if (vals[j - k] !== null) { si += vals[j - k]; ci++; }
+          if (vals[j + k] !== null) { so += vals[j + k]; co++; }
+        }
+        if (ci < bandN * 0.6 || co < bandN * 0.6) continue;
+        if (si / ci - so / co > 12) { found = r0 + j * stepR; break; }
+      }
+      rw[a] = Math.min(found, out);
+    }
+    return fourierLP(circMed(rw, 11), 6);
+  }
+
+  // 生成一條年輪：目標直徑 Dmm；followFrac 控制證據微調力道；
+  // smoothPct（0..100，可省略）控制使用者平滑度，並以周長比例封頂
+  function genRing(Dmm, followFrac, searchMm, smoothPct) {
+    var wb = st.woodB || st.outline;                       // 外形錨點＝木質部邊界（不含樹皮）
+    var shp = fourierLP(wb, 6), meanShp = 0;
+    for (var io = 0; io < A; io++) meanShp += shp[io];
+    meanShp /= A;
+    var maxDia = meanShp * 2 * st.mmpp * 0.92;
+    var Rpx = Dmm / 2 / st.mmpp;
+    var t = Math.max(0, Math.min(1, (Dmm - 30) / (maxDia - 30)));
+    var r = new Float32Array(A);
+    for (var ia = 0; ia < A; ia++) r[ia] = Rpx * ((1 - t) + t * shp[ia] / meanShp);
+    // 內圈證據少（心材斑駁）、比例上又更敏感：微調搜尋範圍跟著直徑縮小
+    var effSearch = Math.min(searchMm, Math.max(1.2, Dmm * 0.03));
+    if (followFrac > 0.05) {
+      r = nudgeRing(r, effSearch, 0.6 * followFrac);
+      r = nudgeRing(r, effSearch, 0.6 * followFrac);
+    }
+    var mR = 0;
+    for (var im = 0; im < A; im++) mR += r[im];
+    var circMm = 2 * Math.PI * (mR / A) * st.mmpp;
+    var HnCap = Math.max(6, Math.round(circMm / 10));
+    // 半徑封頂：小圈保留的起伏諧波更少（真實年輪內圈本來就較圓）
+    var HnR = Math.max(5, Math.round(Dmm / 6));
+    var Hn = (smoothPct === undefined) ? Math.min(HnCap, HnR, Math.round(circMm / 12))
+           : Math.min(HnCap, HnR, Math.max(4, Math.round(36 - smoothPct / 100 * 32)));
+    r = fourierLP(circMed(r, 5), Hn);
+    // 最終保險：任何一段都不得進樹皮（留 1.5mm 邊）
+    var lim = 1.5 / st.mmpp;
+    for (var ic = 0; ic < A; ic++) if (r[ic] > wb[ic] - lim) r[ic] = wb[ic] - lim;
+    return circMed(r, 5);
+  }
+
+  // ── 年輪模式：先把每一條年輪都畫出來，之後用直徑滑桿（或直接點）挑選 ──
+  // 做法：把單圈偵測（切向整合＋DP＋吸附）在不同目標半徑各跑一次（窄帶 ±5mm、
+  // 高跟隨），相鄰種子常會收斂到同一條年輪——平均距離 <1.8mm 視為重複、去掉。
+  // 沿曲線量測「腳下有沒有真的年輪線」：每隔幾度取徑向 ±2mm 的樣本，
+  // 中心點比局部平均暗（暗脊）或徑向對比大（色帶交界）才算有支撐。
+  function ringSupport(r) {
+    var S = RingAnalyzer.state(), px = S.pith.x, py = S.pith.y, w = S.w, h = S.h;
+    function lum(x, y) {
+      var xi = x | 0, yi = y | 0;
+      if (xi < 0 || yi < 0 || xi >= w || yi >= h) return null;
+      var i = yi * w + xi;
+      if (!S.mask[i]) return null;
+      var q = i * 4, R = S.rgba[q], G = S.rgba[q + 1], B = S.rgba[q + 2];
+      var mx = Math.max(R, G, B), mn = Math.min(R, G, B);
+      if (!st.grayImg && mx - mn < 32 && S.lum[i] < 100) return null;   // 墨水不算（灰階圖停用）
+      return S.lum[i];
+    }
+    var good = 0, tot = 0, stepMm = 0.4 / st.mmpp, wRaw = new Float32Array(A);
+    for (var a = 0; a < A; a += 4) {
+      var th = a * 2 * Math.PI / A, ct = Math.cos(th), sn = Math.sin(th);
+      var vals = [], sum = 0, cnt = 0;
+      for (var k = -5; k <= 5; k++) {
+        var v = lum(px + ct * (r[a] + k * stepMm), py + sn * (r[a] + k * stepMm));
+        vals.push(v);
+        if (v !== null) { sum += v; cnt++; }
+      }
+      if (cnt < 8 || vals[5] === null) { wRaw[a] = 0; continue; }
+      tot++;
+      var mean = sum / cnt;
+      var contrast = mean - vals[5];                       // 中心比局部平均暗多少
+      var gradOK = vals[0] !== null && vals[10] !== null && Math.abs(vals[10] - vals[0]) > 10;
+      var ok = (contrast > 3.5 || gradOK);
+      if (ok) good++;
+      wRaw[a] = ok ? 1 : 0;
+    }
+    // 逐角度信心：把 0/1 補到全角度並圓周平滑，得到 0..1 的權重場
+    for (var a2 = 0; a2 < A; a2++) if (a2 % 4) wRaw[a2] = wRaw[a2 - (a2 % 4)];
+    var wArr = fourierLP(circMed(wRaw, 9), 10);
+    for (var a3 = 0; a3 < A; a3++) wArr[a3] = Math.max(0, Math.min(1, wArr[a3]));
+    return { frac: tot ? good / tot : 0, w: wArr };
+  }
+
+  function detectAllRings() {
+    if (!st.ready) return;
+    info('正在逐圈偵測年輪，約需幾秒…');
+    $('btnRings').disabled = true;
+    setTimeout(function () {
+      try {
+        var S = RingAnalyzer.state();
+        var wbm = 0;
+        for (var iw = 0; iw < A; iw++) wbm += (st.woodB || st.outline)[iw];
+        var maxDia = (wbm / A) * 2 * st.mmpp * 0.92;       // 最外圈以木質部邊界為準（不含樹皮）
+        var rings = [];
+        var rings = [];
+        for (var D = 40; D <= maxDia; D += 6) {   // 凹槽直徑最小 50mm，更小的圈不必畫
+          var r = genRing(D, 1, 2.5, undefined);
+          var sup = ringSupport(r).frac;
+          var mean = 0;
+          for (var i = 0; i < A; i++) mean += r[i];
+          var meanDia = mean / A * st.mmpp * 2;
+          var dup = false;
+          for (var k = 0; k < rings.length; k++) {
+            var d = 0, cnt = 0;
+            for (var i2 = 0; i2 < A; i2 += 8) { d += Math.abs(r[i2] - rings[k].r[i2]); cnt++; }
+            if (d / cnt * st.mmpp < 1.8) { dup = true; break; }
+          }
+          if (!dup) rings.push({ r: r, meanDia: meanDia, weak: sup < 0.45 });
+        }
+        rings.sort(function (a, b) { return a.meanDia - b.meanDia; });
+        // 不交叉約束（生物學：年輪一圈套一圈，絕不交叉）——由內往外掃：
+        // 外圈與內圈大面積交叉＝同一條年輪的壞版本，整條丟掉；
+        // 只有小段穿越則把外圈夾到內圈之外（至少留 1.2mm），輕平滑後再夾一次。
+        var gap = 1.2 / st.mmpp, kept = [];
+        rings.forEach(function (R) {
+          if (!kept.length) { kept.push(R); return; }
+          var prev = kept[kept.length - 1], viol = 0;
+          for (var i3 = 0; i3 < A; i3++) if (R.r[i3] < prev.r[i3] + gap) viol++;
+          if (viol > A * 0.25) return;
+          if (viol) {
+            var rr = new Float32Array(R.r);
+            for (var i4 = 0; i4 < A; i4++) if (rr[i4] < prev.r[i4] + gap) rr[i4] = prev.r[i4] + gap;
+            rr = fourierLP(circMed(rr, 5), 26);
+            for (var i5 = 0; i5 < A; i5++) if (rr[i5] < prev.r[i5] + gap) rr[i5] = prev.r[i5] + gap;
+            R.r = rr;
+            var m2 = 0;
+            for (var i6 = 0; i6 < A; i6++) m2 += rr[i6];
+            R.meanDia = m2 / A * st.mmpp * 2;
+          }
+          kept.push(R);
+        });
+        st.allRings = kept; st.ringMode = true; st.prior = null;
+        $('btnRings').textContent = '重新偵測全部年輪';
+        $('ringHint').style.display = 'block';
+        selectRingByDia(Number($('gtR0').value));
+      } catch (e) {
+        info('<span class="bad">年輪偵測失敗：' + e.message + '</span>');
+      }
+      $('btnRings').disabled = false;
+    }, 30);
+  }
+  function selectRingByDia(dia) {
+    if (!st.allRings || !st.allRings.length) return;
+    var best = 0, bd = 1e9;
+    for (var i = 0; i < st.allRings.length; i++) {
+      var d = Math.abs(st.allRings[i].meanDia - dia);
+      if (d < bd) { bd = d; best = i; }
+    }
+    selectRing(best);
+  }
+  function selectRing(idx) {
+    st.selRing = idx;
+    var harmonics = Math.round(36 - Number($('gtSmooth').value) / 100 * 32);
+    st.curve = fourierLP(st.allRings[idx].r, harmonics);   // 平滑度照常作用在選到的那條上
+    st.edited = false;
+    refresh();
+  }
+
+  // ── 極座標動態規劃：在目標半徑帶裡找「最暗的連續一圈」──
+  // 年輪的晚材線在影像上是暗的。把亮度沿每個角度的徑向帶取樣、逐角度去趨勢之後，
+  // 用動態規劃找一條繞一圈、上下移動受限、累積亮度最低的路徑——它會貼著一條真實
+  // 年輪走；紋理弱的地方由「拉回目標半徑」的先驗接手，最後傅立葉低通保證封閉平滑。
+  var A = 720;                       // 角度取樣數
+  function extractCurve(R0mm, bandMm, follow, harmonics, shape) {
+    var S = RingAnalyzer.state();
+    var px = S.pith.x, py = S.pith.y, w = S.w, h = S.h;
+    var stepPx = Math.max(0.75, 0.35 / st.mmpp);           // 徑向步距（px），約 0.35mm
+    var R0 = R0mm / st.mmpp, band = bandMm / st.mmpp;
+
+    // 橢圓（任意形狀）先驗：年輪大致跟外輪廓同形、繞髓心同心。
+    // 把外輪廓低通到只剩 4 個諧波（去掉樹皮凹凸，留下橢圓＋蛋形），
+    // 再等比縮放到平均半徑＝目標半徑，得到逐角度的目標半徑 R0a[θ]。
+    // 圓形木片的低通輪廓就是圓，行為跟舊版完全一樣。
+    var R0a = new Float32Array(A), minR0 = 1e9, maxR0 = 0;
+    if (shape && shape.length === A) {
+      var sm = fourierLP(shape, 4), meanS = 0;
+      for (var i0 = 0; i0 < A; i0++) meanS += sm[i0];
+      meanS /= A;
+      var sc0 = R0 / meanS;
+      for (var i1 = 0; i1 < A; i1++) {
+        R0a[i1] = sm[i1] * sc0;
+        if (R0a[i1] < minR0) minR0 = R0a[i1];
+        if (R0a[i1] > maxR0) maxR0 = R0a[i1];
+      }
+    } else {
+      for (var i1b = 0; i1b < A; i1b++) R0a[i1b] = R0;
+      minR0 = maxR0 = R0;
+    }
+    st.prior = R0a;
+
+    // 取樣網格改成「相對橢圓先驗」：j 代表離 R0a[θ] 的徑向偏移（−band…＋band）。
+    // 年輪與先驗大致同形，在這個網格裡就是近似水平線——這是切向整合的前提。
+    var NR = Math.max(9, Math.round(2 * band / stepPx) | 0);
+    function rOf(a0, j0) { return Math.max(4, R0a[a0] - band + j0 * stepPx); }
+
+    function lumAt(x, y) {           // 雙線性取樣
+      var x0 = x | 0, y0 = y | 0;
+      if (x0 < 0 || y0 < 0 || x0 >= w - 1 || y0 >= h - 1) return null;
+      var fx = x - x0, fy = y - y0, i = y0 * w + x0;
+      if (!S.mask[i]) return null;
+      // 麥克筆遮罩：手寫編號／箭頭／X 是黑墨——暗且幾乎無彩度（木頭再暗都帶橘褐色）。
+      // 墨水是最強的假年輪，直接不取樣，讓先驗在這幾度接手。
+      var q = i * 4;
+      var R = S.rgba[q], G = S.rgba[q + 1], B = S.rgba[q + 2];
+      var mx = R > G ? (R > B ? R : B) : (G > B ? G : B);
+      var mn = R < G ? (R < B ? R : B) : (G < B ? G : B);
+      if (!st.grayImg && mx - mn < 32 && S.lum[i] < 100) return null;
+      return S.lum[i] * (1 - fx) * (1 - fy) + S.lum[i + 1] * fx * (1 - fy) +
+             S.lum[i + w] * (1 - fx) * fy + S.lum[i + w + 1] * fx * fy;
+    }
+
+    // 成本矩陣：三段式——
+    // 一、逐角度取樣＋去徑向趨勢，得到暗脊（細晚材線）與梯度（寬色帶交界）；
+    // 二、切向整合：年輪是「連續」的，同一條年輪在相鄰角度互相印證——
+    //     把每一格的訊號沿 ±4° 的鄰近角度平均，連續的年輪訊號疊加、
+    //     單一射線上的雜訊（鋸痕、毛刺、局部汙點）被平均掉。
+    //     這是粗糙表面「肉眼看得到、單射線抓不到」的關鍵解法；
+    // 三、逐角度穩健正規化（MAD，等效局部對比增強）後組成本。
+    var cost = new Float32Array(A * NR);
+    // 先驗權重設下限：就算跟隨強度拉到 100%，形狀先驗仍留一點拉力。
+    var wTex = follow, wPrior = Math.max(0.25, 1.15 - follow);
+    var ridgeF = new Float32Array(A * NR), gradF = new Float32Array(A * NR);
+    var nullF = new Uint8Array(A * NR);
+    var win = Math.max(2, Math.round(2.0 / st.mmpp / stepPx));   // 約 ±2mm 的局部平均
+    var gStep = Math.max(1, Math.round(1.0 / st.mmpp / stepPx)); // 梯度間距約 1mm
+    for (var a = 0; a < A; a++) {
+      var th = a * 2 * Math.PI / A, ct = Math.cos(th), sn = Math.sin(th);
+      // 局部平均的窗在帶寬兩端會截斷、把端點偽裝成暗線——取樣往兩側各多延伸一個窗寬
+      var ext = new Array(NR + 2 * win);
+      for (var jx = 0; jx < ext.length; jx++) {
+        var rx = rOf(a, jx - win);
+        ext[jx] = lumAt(px + ct * rx, py + sn * rx);
+      }
+      var validE = ext.filter(function (v) { return v !== null; });
+      var medAll = validE.length ? validE.slice().sort(function (x, y) { return x - y; })[validE.length >> 1] : 128;
+      for (var jf = 0; jf < ext.length; jf++) {
+        if (ext[jf] === null) {
+          if (jf >= win && jf < NR + win) nullF[a * NR + (jf - win)] = 1;
+          ext[jf] = medAll;
+        }
+      }
+      for (var j2 = 0; j2 < NR; j2++) {
+        var s0 = 0;
+        for (var k = -win; k <= win; k++) s0 += ext[j2 + win + k];
+        ridgeF[a * NR + j2] = ext[j2 + win] - s0 / (2 * win + 1);
+        var jm = Math.max(0, j2 + win - gStep), jp = Math.min(ext.length - 1, j2 + win + gStep);
+        gradF[a * NR + j2] = (ext[jp] - ext[jm]) / (jp - jm);
+      }
+    }
+    // 切向整合：圓周方向 ±8 個角度（約 ±4°）的移動平均。
+    // 網格是「相對先驗」的，年輪在網格裡近似水平，直接同格平均即可。
+    var TW = 8;
+    var ridgeS = new Float32Array(A * NR), gradS = new Float32Array(A * NR);
+    for (var j9 = 0; j9 < NR; j9++) {
+      for (var a9 = 0; a9 < A; a9++) {
+        var sR = 0, sG2 = 0;
+        for (var k9 = -TW; k9 <= TW; k9++) {
+          var aa = (a9 + k9 + A) % A;
+          sR += ridgeF[aa * NR + j9]; sG2 += gradF[aa * NR + j9];
+        }
+        ridgeS[a9 * NR + j9] = sR / (2 * TW + 1);
+        gradS[a9 * NR + j9] = sG2 / (2 * TW + 1);
+      }
+    }
+    function madScale(arr, base, n) {
+      var abs = [];
+      for (var q2 = 0; q2 < n; q2++) abs.push(Math.abs(arr[base + q2]));
+      abs.sort(function (x, y) { return x - y; });
+      return (abs[abs.length >> 1] * 1.4826) || 1;
+    }
+    for (var a1 = 0; a1 < A; a1++) {
+      var sd = madScale(ridgeS, a1 * NR, NR), sdG = madScale(gradS, a1 * NR, NR);
+      for (var j3b = 0; j3b < NR; j3b++) {
+        var tex;
+        if (nullF[a1 * NR + j3b]) { tex = 3; }
+        else {
+          var tRidge = Math.max(-2, Math.min(2, ridgeS[a1 * NR + j3b] / sd));  // 暗線＝負＝好
+          var gUp = Math.max(0, gradS[a1 * NR + j3b]);                          // 只認「由內暗到外亮」
+          var tEdge = Math.max(-2, -gUp / sdG);
+          tex = Math.min(tRidge, 0.85 * tEdge);                                 // 哪個線索強聽哪個
+        }
+        var prior = Math.pow((j3b * stepPx - band) / band, 2);                  // 相對先驗的偏移
+        cost[a1 * NR + j3b] = wTex * tex + wPrior * prior * 2;
+      }
+    }
+
+    // 兩圈展開的循環 DP：跑兩圈取第二圈，起點的任意性就消掉了
+    var lam = 0.55;                                        // 每格跳動的平滑罰
+    var INF = 1e9, prev = new Float32Array(NR), cur = new Float32Array(NR);
+    var back = new Int8Array(2 * A * NR);
+    for (var j3 = 0; j3 < NR; j3++) prev[j3] = cost[j3];
+    for (var a2 = 1; a2 < 2 * A; a2++) {
+      var ca = cost.subarray((a2 % A) * NR, (a2 % A) * NR + NR);
+      for (var j4 = 0; j4 < NR; j4++) {
+        var best = INF, bk = 0;
+        for (var d = -2; d <= 2; d++) {
+          var pj = j4 + d; if (pj < 0 || pj >= NR) continue;
+          var c2 = prev[pj] + lam * Math.abs(d);
+          if (c2 < best) { best = c2; bk = d; }
+        }
+        cur[j4] = best + ca[j4];
+        back[a2 * NR + j4] = bk;
+      }
+      var t = prev; prev = cur; cur = t;
+    }
+    // 回溯（從第二圈末端），取後半圈當結果
+    var endJ = 0, bestEnd = INF;
+    for (var j5 = 0; j5 < NR; j5++) if (prev[j5] < bestEnd) { bestEnd = prev[j5]; endJ = j5; }
+    var path = new Float32Array(2 * A); var jj = endJ;
+    for (var a3 = 2 * A - 1; a3 >= 0; a3--) {
+      path[a3] = rOf(a3 % A, jj);
+      // 前向轉移是 prev[j + d] → cur[j]，所以回溯是 j → j + d（加，不是減）
+      if (a3 > 0) jj = Math.max(0, Math.min(NR - 1, jj + back[a3 * NR + jj]));
+    }
+    var rArr = new Float32Array(A);
+    for (var a4 = 0; a4 < A; a4++) rArr[a4] = path[A + a4 >= 2 * A ? a4 : A + a4];
+
+    // 圓周中位數濾波 → 傅立葉低通（保留 harmonics 個諧波；同時保證封閉）
+    rArr = circMed(rArr, 7);
+    rArr = fourierLP(rArr, harmonics);
+
+    // ── 吸附微調（active contour）──
+    // 傅立葉平滑是盲目的：DP 已經咬住年輪，整體抹平卻會把曲線從線上拖開一點。
+    // 平滑完再讓每個角度在 ±1.5mm 內重新吸回局部最暗的線——只做小幅修正，
+    // 全局形狀不動。吸附幅度跟著「跟隨強度」走：強度低＝幾乎不吸（保持圓順）。
+    var ampMm = 2.5 * follow;                              // follow 0..1
+    if (ampMm > 0.1) {
+      var K = 8, dr = ampMm / K;                           // 兩側各 8 個取樣點
+      for (var it = 0; it < 3; it++) {
+        // 每個角度先算「想往哪吸」的偏移量，但不直接套用——
+        // 偏移場自己先做圓周平滑＋低通（≤20 諧波），再加回曲線。
+        // 這樣局部能貼、又不會出現逐角度亂跳的像素尖角（會讓最小凹半徑掉到零）。
+        var off = new Float32Array(A);
+        for (var a5 = 0; a5 < A; a5++) {
+          var th5 = a5 * 2 * Math.PI / A, c5 = Math.cos(th5), s5 = Math.sin(th5);
+          var vals = [], sum5 = 0, sq5 = 0, cnt5 = 0;
+          for (var k5 = -K; k5 <= K; k5++) {
+            var rr = rArr[a5] + k5 * dr / st.mmpp;
+            var v5 = lumAt(px + c5 * rr, py + s5 * rr);
+            vals.push(v5);
+            if (v5 !== null) { sum5 += v5; sq5 += v5 * v5; cnt5++; }
+          }
+          if (cnt5 < K) { off[a5] = 0; continue; }         // 這方向沒訊號（墨水／出界）就不動
+          var mean5 = sum5 / cnt5;
+          var sd5 = Math.sqrt(Math.max(1, sq5 / cnt5 - mean5 * mean5));
+          var bestK = 0, bestV = 1e9;
+          for (var k6 = -K; k6 <= K; k6++) {
+            if (vals[k6 + K] === null) continue;
+            var sc = (vals[k6 + K] - mean5) / sd5 + Math.abs(k6) * 0.15;   // 暗＋離得近＝好
+            if (sc < bestV) { bestV = sc; bestK = k6; }
+          }
+          off[a5] = bestK * dr / st.mmpp;
+        }
+        off = fourierLP(circMed(off, 7), 14);
+        for (var a6 = 0; a6 < A; a6++) rArr[a6] += 0.6 * off[a6];   // 每輪只走 6 成，避免震盪
+      }
+    }
+    return rArr;
+  }
+
+  function circMed(a, win) {
+    var n = a.length, h = win >> 1, out = new Float32Array(n);
+    for (var i = 0; i < n; i++) {
+      var buf = [];
+      for (var k = -h; k <= h; k++) buf.push(a[(i + k + n) % n]);
+      buf.sort(function (x, y) { return x - y; });
+      out[i] = buf[h];
+    }
+    return out;
+  }
+  function fourierLP(a, H) {
+    var n = a.length, out = new Float32Array(n);
+    var A0 = 0; for (var i = 0; i < n; i++) A0 += a[i]; A0 /= n;
+    var cs = [], ss = [];
+    for (var k = 1; k <= H; k++) {
+      var c = 0, s = 0;
+      for (var i2 = 0; i2 < n; i2++) { var t = 2 * Math.PI * k * i2 / n; c += a[i2] * Math.cos(t); s += a[i2] * Math.sin(t); }
+      cs.push(2 * c / n); ss.push(2 * s / n);
+    }
+    for (var i3 = 0; i3 < n; i3++) {
+      var v = A0;
+      for (var k2 = 1; k2 <= H; k2++) { var t2 = 2 * Math.PI * k2 * i3 / n; v += cs[k2 - 1] * Math.cos(t2) + ss[k2 - 1] * Math.sin(t2); }
+      out[i3] = v;
+    }
+    return out;
+  }
+
+  // 外輪廓（極座標：每個角度的遮罩最遠點），供 CNC 定位凹穴
+  // 補實木片內部的洞：黑墨字、暗斑、孔洞在分割時可能被當成「非木頭」而在
+  // 木片內部形成破洞，害外框往外走時提早停住、繞開黑字。從影像邊界往內
+  // 淹水填背景，淹不到的「內部非木頭」一律補成木頭——外框就沿真實邊緣走。
+  function filledMask() {
+    if (st.maskFilled) return st.maskFilled;
+    var S = RingAnalyzer.state(), w = S.w, h = S.h, n = w * h, m = S.mask;
+    var reached = new Uint8Array(n), stack = [];
+    for (var x = 0; x < w; x++) { stack.push(x); stack.push((h - 1) * w + x); }
+    for (var y = 0; y < h; y++) { stack.push(y * w); stack.push(y * w + w - 1); }
+    while (stack.length) {
+      var i = stack.pop();
+      if (reached[i] || m[i]) continue;
+      reached[i] = 1;
+      var xx = i % w, yy = (i / w) | 0;
+      if (xx > 0) stack.push(i - 1);
+      if (xx < w - 1) stack.push(i + 1);
+      if (yy > 0) stack.push(i - w);
+      if (yy < h - 1) stack.push(i + w);
+    }
+    var f = new Uint8Array(n);
+    for (var k = 0; k < n; k++) f[k] = (m[k] || !reached[k]) ? 1 : 0;   // 木頭 或 內部洞 → 木頭
+    st.maskFilled = f;
+    return f;
+  }
+  // 外框用遮罩：對木頭遮罩做「形態學閉運算」（先膨脹再侵蝕）。
+  // 不靠顏色判斷——凡是比刷子窄的縫隙（黑字、細裂、薄樹皮的斷點）幾何上一律補平，
+  // 剩下的就是完整木片。降採樣 4× 加速；分離式盒狀 max／min 各兩趟。
+  function closedMask() {
+    if (st.cmask) return st.cmask;
+    var S = RingAnalyzer.state(), w = S.w, h = S.h, m = S.mask;
+    var DS = 4, dw = Math.ceil(w / DS), dh = Math.ceil(h / DS), dn = dw * dh;
+    var d0 = new Uint8Array(dn);
+    for (var y = 0; y < h; y++) { var yy = (y / DS) | 0; for (var x = 0; x < w; x++) if (m[y * w + x]) d0[yy * dw + ((x / DS) | 0)] = 1; }
+    var r = 5;                                             // 半徑 5 × DS4 ≈ 20px，可補約 40px 寬的縫
+    function boxPass(src, want) {                          // want=1 → max(膨脹)，0 → min(侵蝕)
+      var tmp = new Uint8Array(dn), out = new Uint8Array(dn);
+      for (var yy2 = 0; yy2 < dh; yy2++) for (var xx = 0; xx < dw; xx++) {   // 水平
+        var v = want ? 0 : 1;
+        for (var k = -r; k <= r; k++) { var xi = xx + k; if (xi < 0 || xi >= dw) { if (!want) { v = 0; break; } continue; } var s = src[yy2 * dw + xi]; v = want ? (v | s) : (v & s); }
+        tmp[yy2 * dw + xx] = v;
+      }
+      for (var xx2 = 0; xx2 < dw; xx2++) for (var yy3 = 0; yy3 < dh; yy3++) {  // 垂直
+        var v2 = want ? 0 : 1;
+        for (var k2 = -r; k2 <= r; k2++) { var yi = yy3 + k2; if (yi < 0 || yi >= dh) { if (!want) { v2 = 0; break; } continue; } var s2 = tmp[yi * dw + xx2]; v2 = want ? (v2 | s2) : (v2 & s2); }
+        out[yy3 * dw + xx2] = v2;
+      }
+      return out;
+    }
+    var closed = boxPass(boxPass(d0, 1), 0);               // 閉＝先膨脹後侵蝕
+    st.cmask = { d: closed, dw: dw, dh: dh, DS: DS };
+    return st.cmask;
+  }
+  function extractOutline() {
+    // 由髓心往外掃「閉運算後的木片遮罩」：一路木頭，遇到持續背景才是外緣。
+    var S = RingAnalyzer.state(), px = S.pith.x, py = S.pith.y, w = S.w, h = S.h;
+    var C = closedMask(), cd = C.d, dw = C.dw, dh = C.dh, DS = C.DS;
+    var out = new Float32Array(A);
+    // 由外往內掃：閉運算已把薄樹皮加厚，從影像邊界往內遇到第一段持續木頭＝外緣
+    // （樹皮）。這樣不理會木片內部那片被誤判的淡色缺口，外框只認最外圈的樹皮。
+    var need = Math.max(3, Math.round(4 / st.mmpp / 1.5));
+    // 條件 B 的最小厚度：暗色段至少 1.5mm 才可能是樹皮（磚縫多半 <1mm）
+    var runB = Math.max(4, Math.round(1.5 / st.mmpp / 1.5));
+    // 外框判定比主遮罩更寬容：遮罩認定的木頭「或」明顯比背景暗的像素（薄樹皮）。
+    // 薄樹皮在模糊／壓縮較重的照片裡會被主遮罩漏掉，但它永遠比白地磚暗得多；
+    // 門檻取背景亮度的 0.55，灰色磚縫（約 0.65–0.8）過不了，樹皮（<0.5）過得了。
+    var bgL = S.bg ? (0.299 * S.bg[0] + 0.587 * S.bg[1] + 0.114 * S.bg[2]) : 230, darkT = bgL * 0.55;
+    // 暗色遮罩先做「開運算」（先侵蝕再膨脹）：磚縫、麥克筆線這類細長暗線
+    // （<1.2mm）會被整條抹掉，只留樹皮這種厚的暗塊——外框才不會沿著磚縫射出去。
+    // 第二條線索：彩度。底是白地磚（無彩度，連磚縫、陰影都只是灰），而木頭
+    // 再淡也是黃的——淡邊材彩度 >56、地磚 <32，中間是空的，一刀就分得開。
+    // 這條線索把「淡邊材被誤當背景」的缺口補回來，讓外框真的照顏色出現的地方走。
+    var bgC = S.bg ? (Math.max(S.bg[0], S.bg[1], S.bg[2]) - Math.min(S.bg[0], S.bg[1], S.bg[2])) : 8;
+    var chromaT = Math.min(60, Math.max(36, bgC * 1.8 + 14)), rgba = S.rgba;
+    var rd = Math.max(1, Math.round(0.6 / st.mmpp / DS)), n2 = dw * dh;
+    var dk0 = new Uint8Array(n2), dk1 = new Uint8Array(n2), dk = new Uint8Array(n2);
+    for (var yy = 0; yy < dh; yy++) { var sy = Math.min(h - 1, yy * DS + (DS >> 1)) * w;
+      for (var xx = 0; xx < dw; xx++) {
+        var pi = sy + Math.min(w - 1, xx * DS + (DS >> 1)), q4 = pi * 4;
+        var cr = rgba[q4], cg = rgba[q4 + 1], cb = rgba[q4 + 2];
+        var chr = Math.max(cr, cg, cb) - Math.min(cr, cg, cb);
+        dk0[yy * dw + xx] = (S.lum[pi] < darkT || chr > chromaT) ? 1 : 0; } }
+    function sqMorph(src, dst, erode) {   // 可分離方形 侵蝕/膨脹，半徑 rd
+      var t = new Uint8Array(n2), i, j, k, v;
+      for (i = 0; i < dh; i++) for (j = 0; j < dw; j++) { v = erode ? 1 : 0;
+        for (k = -rd; k <= rd; k++) { var jj = j + k; var s0 = (jj < 0 || jj >= dw) ? 0 : src[i * dw + jj]; if (erode ? !s0 : s0) { v = erode ? 0 : 1; break; } }
+        t[i * dw + j] = v; }
+      for (i = 0; i < dh; i++) for (j = 0; j < dw; j++) { v = erode ? 1 : 0;
+        for (k = -rd; k <= rd; k++) { var ii = i + k; var s1 = (ii < 0 || ii >= dh) ? 0 : t[ii * dw + j]; if (erode ? !s1 : s1) { v = erode ? 0 : 1; break; } }
+        dst[i * dw + j] = v; }
+    }
+    sqMorph(dk0, dk1, true); sqMorph(dk1, dk, false);
+    function isWood(x, y) {
+      var xi = (x / DS) | 0, yi = (y / DS) | 0;
+      if (xi < 0 || yi < 0 || xi >= dw || yi >= dh) return false;
+      var q = yi * dw + xi;
+      return !!(cd[q] || dk[q]);
+    }
+    for (var a = 0; a < A; a++) {
+      var th = a * 2 * Math.PI / A, ct = Math.cos(th), sn = Math.sin(th);
+      var rEdge = 40;
+      for (var rb = 60; rb < 2600; rb += 20) { var xb = px + ct * rb, yb = py + sn * rb; if (xb < 0 || yb < 0 || xb >= w || yb >= h) break; rEdge = rb; }
+      var found = 0;
+      for (var rr = rEdge; rr > 4; rr -= 1.5) {
+        if (!isWood(px + ct * rr, py + sn * rr)) continue;
+        // 條件 A：往內連續 need 個都是木頭（厚樹皮／正常邊緣）
+        var ok = true;
+        for (var k = 1; k <= need; k++) { if (!isWood(px + ct * (rr - k * 1.5), py + sn * (rr - k * 1.5))) { ok = false; break; } }
+        // 條件 B：薄樹皮＋後面淡邊材被誤判成背景時，樹皮仍是真正外緣——
+        //         只要「從這裡往內到髓心」大多是木頭就承認；地磚上的小雜點往內一大段
+        //         都是背景，過不了這關。這是外框在臨界照片上不被切的關鍵。
+        if (!ok) {
+          // 先量這段暗色／木頭「連續有多厚」：磚縫只有 1–3 格（薄），樹皮至少 2.5mm（厚）
+          var run = 1; while (run < 200 && isWood(px + ct * (rr - run * 1.5), py + sn * (rr - run * 1.5))) run++;
+          if (run >= runB) {
+            var wc = 0, tc = 0; for (var r2 = rr; r2 > 4; r2 -= 3) { tc++; if (isWood(px + ct * r2, py + sn * r2)) wc++; }
+            ok = tc > 0 && wc / tc >= 0.55;
+          }
+        }
+        if (ok) { found = rr; break; }
+      }
+      out[a] = found;
+    }
+    // 角度方向的形態學閉合：填平窄的內凹缺口（淡色邊材被誤判成背景、黑字切穿等
+    // 造成的凹口），不影響樹皮的大形狀。閉＝先取角度窗最大（撐開）再取最小（收回）。
+    var HW = 6;                                            // ±6 樣本 ≈ ±3°：只填黑字、裂縫這類極窄缺口；真實的內凹（節疤、缺角）照實描
+    function circDilate(arr) { var n = arr.length, o = new Float32Array(n); for (var i = 0; i < n; i++) { var mx = 0; for (var k = -HW; k <= HW; k++) { var v = arr[(i + k + n) % n]; if (v > mx) mx = v; } o[i] = mx; } return o; }
+    function circErode(arr) { var n = arr.length, o = new Float32Array(n); for (var i = 0; i < n; i++) { var mn = 1e9; for (var k = -HW; k <= HW; k++) { var v = arr[(i + k + n) % n]; if (v < mn) mn = v; } o[i] = mn; } return o; }
+    out = circErode(circDilate(out));
+    // （已取消凸包保底：樹皮改由暗色遮罩找回後，內凹都是真的，外框要貼著實際輪廓走）
+    return fourierLP(circMed(out, 5), 90);
+  }
+  // 凸包保底：真實木片外形近乎凸，深的內凹幾乎都是「淡邊材被當白底」的誤判。
+  // 不讓外框比凸包內縮超過 tolFrac×平均半徑（保留小的真實凹陷）。
+  // 這是外框的最後一道穩定保險，讓臨界照片在任何機器上都不會被切。
+  function convexFloor(arr, tolFrac) {
+    var n = arr.length, pts = [];
+    for (var i = 0; i < n; i++) { var th = i * 2 * Math.PI / n; pts.push([Math.cos(th) * arr[i], Math.sin(th) * arr[i]]); }
+    var P = pts.slice().sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
+    function cross(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
+    var lower = [], upper = [];
+    for (var i2 = 0; i2 < P.length; i2++) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], P[i2]) <= 0) lower.pop(); lower.push(P[i2]); }
+    for (var i3 = P.length - 1; i3 >= 0; i3--) { while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], P[i3]) <= 0) upper.pop(); upper.push(P[i3]); }
+    var hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+    if (hull.length < 3) return arr;
+    var meanR = 0; for (var m = 0; m < n; m++) meanR += arr[m]; meanR /= n;
+    // 凸包射線半徑：只填「窄的內凹缺口」（黑字切穿等），永不超出凸包，安全
+    var tol = meanR * tolFrac, res = new Float32Array(n);
+    for (var a = 0; a < n; a++) {
+      var th2 = a * 2 * Math.PI / n, dx = Math.cos(th2), dy = Math.sin(th2), rH = 0;
+      for (var e = 0; e < hull.length; e++) {
+        var A0 = hull[e], B0 = hull[(e + 1) % hull.length], ex = B0[0] - A0[0], ey = B0[1] - A0[1];
+        var den = dx * ey - dy * ex; if (Math.abs(den) < 1e-9) continue;
+        var t = (A0[0] * ey - A0[1] * ex) / den, s = (A0[0] * dy - A0[1] * dx) / den;
+        if (t > 0 && s >= -1e-6 && s <= 1 + 1e-6 && t > rH) rH = t;
+      }
+      res[a] = Math.max(arr[a], rH - tol);
+    }
+    return res;
+  }
+
+  // 曲線最小凹半徑（銑刀檢查）：離散曲率
+  function minRadius(rArr) {
+    var n = rArr.length, pts = [];
+    for (var i = 0; i < n; i++) {
+      var th = i * 2 * Math.PI / n;
+      pts.push([Math.cos(th) * rArr[i], Math.sin(th) * rArr[i]]);
+    }
+    var worst = Infinity;
+    for (var j = 0; j < n; j++) {
+      var p0 = pts[(j - 4 + n) % n], p1 = pts[j], p2 = pts[(j + 4) % n];
+      var aL = Math.hypot(p1[0]-p0[0], p1[1]-p0[1]), bL = Math.hypot(p2[0]-p1[0], p2[1]-p1[1]),
+          cL = Math.hypot(p2[0]-p0[0], p2[1]-p0[1]);
+      var s = (aL + bL + cL) / 2, area = Math.sqrt(Math.max(0, s*(s-aL)*(s-bL)*(s-cL)));
+      if (area < 1e-6) continue;
+      var R = aL * bL * cL / (4 * area);
+      if (R < worst) worst = R;
+    }
+    return worst * st.mmpp;
+  }
+
+  // 半徑陣列 → 絕對像素座標點列（繞髓心）
+  function radialToXY(rArr) {
+    var S = RingAnalyzer.state(), px = S.pith.x, py = S.pith.y, n = rArr.length, pts = [];
+    for (var i = 0; i < n; i++) {
+      var th = i * 2 * Math.PI / n;
+      pts.push([px + Math.cos(th) * rArr[i], py + Math.sin(th) * rArr[i]]);
+    }
+    return pts;
+  }
+  // 沿曲線法線偏移 dPx（正＝往外、負＝往內）。中心線經傅立葉低通後夠平滑，
+  // 偏移量（1mm 級）遠小於最小曲率半徑，法線偏移不會自交。
+  function offsetXY(pts, dPx) {
+    var S = RingAnalyzer.state(), px = S.pith.x, py = S.pith.y, n = pts.length, out = [];
+    for (var i = 0; i < n; i++) {
+      var p0 = pts[(i - 1 + n) % n], p2 = pts[(i + 1) % n], p1 = pts[i];
+      var tx = p2[0] - p0[0], ty = p2[1] - p0[1];
+      var L = Math.hypot(tx, ty) || 1;
+      var nx = -ty / L, ny = tx / L;                       // 切線的法向量
+      if (nx * (p1[0] - px) + ny * (p1[1] - py) < 0) { nx = -nx; ny = -ny; }  // 統一指向外
+      out.push([p1[0] + nx * dPx, p1[1] + ny * dPx]);
+    }
+    return out;
+  }
+  // 依槽寬與刀徑排刀路：回傳每條刀路的偏移量（mm，相對中心線，負＝內）
+  function planPasses(Wmm, bitMm) {
+    if (Wmm <= bitMm + 0.05) return [0];                   // 一刀就是槽寬
+    var span = Wmm - bitMm;                                // 刀心可分佈的總寬
+    var nPass = Math.max(2, Math.ceil(span / (bitMm * 0.8)) + 1);
+    var offs = [];
+    for (var i = 0; i < nPass; i++) offs.push(-span / 2 + span * i / (nPass - 1));
+    return offs;
+  }
+
+  function recompute() {
+    if (!st.ready) return;
+    st.outline = extractOutline();                          // 先取外輪廓
+    st.woodB = computeWoodBoundary();                       // 木質部邊界（不含樹皮）＝年輪家族的外形錨點
+    if ($('gtNoGroove').checked) {                          // 這片只做手繪雕刻：整組年輪凹槽停用
+      st.curve = null; st.prior = null;
+      refresh();
+      return;
+    }
+    if (st.ringMode && st.allRings) {                       // 年輪模式：直徑滑桿＝挑選年輪
+      st.prior = null;
+      selectRingByDia(Number($('gtR0').value));
+      return;
+    }
+    // 單圈模式也用「模型保底＋證據微調」：與年輪模式同一套邏輯，
+    // 跟隨強度＝往暗線拉的力道；帶寬＝往兩側找暗線的範圍；平滑度＝諧波數。
+    var searchMm = Math.max(1.5, Math.min(5, Number($('gtBand').value) / 2));
+    st.curve = genRing(Number($('gtR0').value),
+                       Number($('gtFollow').value) / 100,
+                       searchMm,
+                       Number($('gtSmooth').value));
+    st.prior = null;
+    st.edited = false;
+    refresh();
+  }
+
+  // 由 st.curve 導出刀路／回中槽並重畫——手動拖曳修形後也走這裡，不重跑偵測
+  function refresh() {
+    if (!st.curve) {                                        // 凹槽停用：只留外輪廓／髓心／雕刻
+      st.paths = null; st.passOffsets = null; st.feedPaths = null; st.feedLenMm = 0;
+      draw();
+      info('年輪凹槽：<b>已停用</b>（只做手繪雕刻）。SVG／DXF 仍含 OUTLINE（定位凹穴）、PITH 與 ENGRAVE 圖層。');
+      $('btnSvg').disabled = $('btnDxf').disabled = $('btnPng').disabled = false;
+      $('btnNc').disabled = $('btnTap').disabled = true;   // 凹槽 G-code 沒東西可切
+      return;
+    }
+    var rArr = st.curve;
+    // 刀路：槽寬 > 刀徑時產生多條偏移曲線
+    var Wmm = Number($('gtW').value), bit = Number($('gtBit').value);
+    var ctr = radialToXY(rArr);
+    st.passOffsets = planPasses(Wmm, bit);
+    st.paths = st.passOffsets.map(function (o) { return o === 0 ? ctr : offsetXY(ctr, o / st.mmpp); });
+    // 回中凹槽：從髓心沿指定方向直切到年輪圈（燈條走線用），同槽寬、同排刀邏輯
+    st.feedPaths = null; st.feedLenMm = 0;
+    var dir = $('gtFeed').value;
+    if (dir) {
+      var thMap = { right: 0, down: Math.PI / 2, left: Math.PI, up: 3 * Math.PI / 2 };
+      var th = thMap[dir], A2 = rArr.length;
+      var aIdx = Math.round(th / (2 * Math.PI) * A2) % A2;
+      var rEnd = rArr[aIdx];                               // 該方向上年輪圈中心線的半徑（px）
+      var S2 = RingAnalyzer.state(), fx = S2.pith.x, fy = S2.pith.y;
+      var ux = Math.cos(th), uy = Math.sin(th), nx2 = -uy, ny2 = ux;
+      st.feedPaths = st.passOffsets.map(function (o) {
+        var op = o / st.mmpp;
+        return [[fx + nx2 * op, fy + ny2 * op], [fx + ux * rEnd + nx2 * op, fy + uy * rEnd + ny2 * op]];
+      });
+      st.feedLenMm = rEnd * st.mmpp;
+    }
+    draw(); report();
+  }
+
+  function draw() {
+    var cv = $('gtCv'), S = RingAnalyzer.state();
+    cv.width = S.w; cv.height = S.h;
+    var ctx = cv.getContext('2d');
+    ctx.drawImage(st.img, 0, 0, S.w, S.h);
+    var px = S.pith.x, py = S.pith.y;
+    // 木質部邊界（木／皮交界）：淡白虛線——年輪家族只會長在這條線以內
+    if (st.woodB) {
+      ctx.strokeStyle = 'rgba(255,255,255,.45)'; ctx.lineWidth = 1.2; ctx.setLineDash([4, 5]);
+      poly(ctx, px, py, st.woodB); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // 年輪模式：畫出全部偵測到的年輪（淡黃細線；選中的那條由下方橘線呈現）
+    if (st.ringMode && st.allRings) {
+      for (var ri = 0; ri < st.allRings.length; ri++) {
+        if (ri === st.selRing) continue;
+        ctx.strokeStyle = st.allRings[ri].weak ? 'rgba(255,235,110,.25)' : 'rgba(255,235,110,.55)';
+        ctx.lineWidth = 1.3;
+        poly(ctx, px, py, st.allRings[ri].r); ctx.stroke();
+      }
+    }
+    // 目標帶（跟著橢圓先驗走）
+    var band = Number($('gtBand').value) / st.mmpp;
+    if (st.prior) {
+      var inner = new Float32Array(A), outer = new Float32Array(A);
+      for (var bi = 0; bi < A; bi++) { inner[bi] = Math.max(1, st.prior[bi] - band); outer[bi] = st.prior[bi] + band; }
+      ctx.strokeStyle = 'rgba(255,255,255,.25)'; ctx.setLineDash([5,5]); ctx.lineWidth = 1;
+      poly(ctx, px, py, inner); ctx.stroke();
+      poly(ctx, px, py, outer); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // 外輪廓
+    if (st.outline) {
+      ctx.strokeStyle = 'rgba(94,230,168,.8)'; ctx.lineWidth = 2;
+      poly(ctx, px, py, st.outline); ctx.stroke();
+    }
+    // 凹槽帶（成品寬度）＋每條刀路
+    if (st.curve) {
+      var Wpx = Number($('gtW').value) / st.mmpp;
+      ctx.strokeStyle = 'rgba(200,135,74,.35)'; ctx.lineWidth = Wpx;
+      ctx.lineJoin = 'round';
+      poly(ctx, px, py, st.curve); ctx.stroke();
+      if (st.paths) {
+        for (var pi = 0; pi < st.paths.length; pi++) {
+          ctx.strokeStyle = pi % 2 ? '#ffd28c' : '#ffb35c'; ctx.lineWidth = 2;
+          polyXY(ctx, st.paths[pi]); ctx.stroke();
+        }
+      }
+      // 回中凹槽
+      if (st.feedPaths) {
+        ctx.strokeStyle = 'rgba(200,135,74,.35)'; ctx.lineWidth = Wpx; ctx.lineCap = 'round';
+        var f0 = st.feedPaths[0], fN = st.feedPaths[st.feedPaths.length - 1];
+        ctx.beginPath();
+        ctx.moveTo((f0[0][0] + fN[0][0]) / 2, (f0[0][1] + fN[0][1]) / 2);
+        ctx.lineTo((f0[1][0] + fN[1][0]) / 2, (f0[1][1] + fN[1][1]) / 2);
+        ctx.stroke();
+        ctx.lineCap = 'butt';
+        for (var fi = 0; fi < st.feedPaths.length; fi++) {
+          ctx.strokeStyle = fi % 2 ? '#ffd28c' : '#ffb35c'; ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(st.feedPaths[fi][0][0], st.feedPaths[fi][0][1]);
+          ctx.lineTo(st.feedPaths[fi][1][0], st.feedPaths[fi][1][1]);
+          ctx.stroke();
+        }
+      }
+    }
+    // 居民手繪雕刻（mm → 畫布：x=髓心+mx/mmpp，y=髓心−my/mmpp）
+    if (eng.paths) {
+      ctx.strokeStyle = '#7ee0ff'; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      eng.paths.forEach(function (p) {
+        ctx.beginPath();
+        for (var i = 0; i < p.length; i++) {
+          var x = px + p[i][0] / st.mmpp, y = py - p[i][1] / st.mmpp;
+          i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+        }
+        ctx.stroke();
+      });
+    }
+    // 髓心
+    ctx.strokeStyle = '#78b4ff'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(px-10,py); ctx.lineTo(px+10,py); ctx.moveTo(px,py-10); ctx.lineTo(px,py+10); ctx.stroke();
+  }
+  function poly(ctx, px, py, rArr) {
+    ctx.beginPath();
+    for (var i = 0; i <= rArr.length; i++) {
+      var k = i % rArr.length, th = k * 2 * Math.PI / rArr.length;
+      var x = px + Math.cos(th) * rArr[k], y = py + Math.sin(th) * rArr[k];
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+  }
+  function polyXY(ctx, pts) {
+    ctx.beginPath();
+    for (var i = 0; i <= pts.length; i++) {
+      var p = pts[i % pts.length];
+      i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]);
+    }
+  }
+
+  function report() {
+    var r = st.curve, mm = st.mmpp, n = r.length, half = n >> 1;
+    // 過髓心的「寬度」＝ r(θ)+r(θ+180°)：對橢圓、髓心偏一邊的木片才是真的直徑
+    var lo = Infinity, hi = 0, sum = 0;
+    for (var i = 0; i < half; i++) {
+      var wMm = (r[i] + r[i + half]) * mm;
+      if (wMm < lo) lo = wMm; if (wMm > hi) hi = wMm; sum += wMm;
+    }
+    var bit = Number($('gtBit').value), W = Number($('gtW').value);
+    var span = Math.max(0, W - bit);
+    var minR = minRadius(r) - span / 2;                    // 最急處在最內側那條刀路上
+    var okBit = minR > bit / 2 * 1.3;
+    var html = '';
+    if (st.ringMode && st.allRings) {
+      var nWeak = st.allRings.filter(function (R) { return R.weak; }).length;
+      html += '年輪模式：偵測到 <b>' + st.allRings.length + ' 條</b>' +
+        (nWeak ? '（' + nWeak + ' 條訊號弱、以平滑形狀顯示較淡）' : '') +
+        '，鎖定第 <b>' + (st.selRing + 1) + '</b> 條（平均直徑 ' + st.allRings[st.selRing].meanDia.toFixed(1) +
+        ' mm' + (st.allRings[st.selRing].weak ? '，<span class="bad">訊號弱</span>' : '') + '）——移動直徑滑桿或直接點別條年輪切換<br>';
+    }
+    html += '凹槽曲線：長軸 <b>' + hi.toFixed(1) + '</b>／短軸 <b>' + lo.toFixed(1) + ' mm</b>（平均 ' + (sum / half).toFixed(1) + '）<br>';
+    if (W < bit - 0.05) {
+      html += '<span class="bad">✗ 槽寬 ' + W + 'mm 比刀徑 ' + bit + 'mm 窄——這把刀切不出這麼窄的槽</span><br>';
+    } else if (st.passOffsets && st.passOffsets.length > 1) {
+      html += '刀路：<b>' + st.passOffsets.length + ' 條</b>（' + bit + 'mm 刀，刀心偏移 ' +
+        st.passOffsets.map(function (o) { return (o > 0 ? '+' : '') + o.toFixed(1); }).join('／') +
+        ' mm → 槽寬 ' + W + 'mm）<br>';
+    } else {
+      html += '刀路：<b>1 條</b>（' + bit + 'mm 刀一刀＝槽寬）<br>';
+    }
+    if (st.feedPaths) {
+      var dirName = { up: '上', down: '下', left: '左', right: '右' }[$('gtFeed').value];
+      html += '回中凹槽：<b>' + dirName + '</b>　髓心→年輪圈 ' + st.feedLenMm.toFixed(1) + ' mm（' +
+        st.feedPaths.length + ' 條直線刀路，圖層 FEED_A/B）<br>';
+    }
+    html += '最小凹半徑：<b class="' + (okBit ? 'good' : 'bad') + '">' + minR.toFixed(1) + ' mm</b>' +
+      (okBit ? '　✓ ' + bit + 'mm 刀可走' : '　✗ 對 ' + bit + 'mm 刀太急——調高平滑度或降低跟隨強度') + '<br>';
+    var est = grooveTimeEstimate();
+    if (est) {
+      html += '預估切割時間：<b>約 ' + Math.ceil(est.mins) + ' 分鐘</b>（深 ' + $('gtDepth').value + 'mm × ' +
+        est.levels + ' 層，切削 ' + est.lenM.toFixed(1) + ' m）<br>';
+    }
+    if (st.heartRatio != null) {                           // 相對年齡參考（不吃比例尺）
+      html += '心材比例：<b>' + st.heartRatio.toFixed(2) + '</b>（相對年齡參考，愈高愈老' +
+        (st.heartReliable ? '' : '；<span class="bad">此片把握度低</span>') + '）<br>';
+    }
+    html += '比例尺：' + mm.toFixed(4) + ' mm/px　點數：' + n;
+    // 斜拍檢查：有填最短直徑就核對「照片上的短軸換算 mm」
+    var dMin = Number($('gtDiaMin').value);
+    if (dMin > 0) {
+      var S = RingAnalyzer.state();
+      var minorMm = S.geom.minorPx * mm;
+      var diff = Math.abs(minorMm - dMin) / dMin * 100;
+      html += '<br>斜拍檢查：照片短軸 ' + minorMm.toFixed(1) + ' mm vs 實測 ' + dMin.toFixed(1) + ' mm　' +
+        (diff <= 5
+          ? '<span class="good">差 ' + diff.toFixed(1) + '%　✓ 沒有斜拍</span>'
+          : '<span class="bad">差 ' + diff.toFixed(1) + '%　✗ 可能斜拍或量錯位置——請垂直重拍</span>');
+    }
+    info(html);
+    $('btnSvg').disabled = $('btnDxf').disabled = $('btnPng').disabled = $('btnNc').disabled = $('btnTap').disabled = false;
+  }
+  function info(html) { $('gtInfo').innerHTML = html; }
+
+  // 預估切割時間：切削長度／進給 ＋ 每層下刀時間（與匯出 G-code 同一套公式）
+  function grooveTimeEstimate() {
+    if (!st.paths) return null;
+    var depth = Number($('gtDepth').value), step = Number($('gtStepDown').value);
+    var F = Number($('gtFxy').value), Fz = Number($('gtFz').value);
+    if (!(depth > 0) || !(step > 0) || !(F > 0) || !(Fz > 0)) return null;
+    var nLevels = Math.max(1, Math.ceil(depth / step - 1e-9));
+    var lenPx = 0, nPaths = st.paths.length;
+    st.paths.forEach(function (p) {                        // 封閉圈（px 座標）
+      for (var i = 0; i < p.length; i++) {
+        var q = p[(i + 1) % p.length];
+        lenPx += Math.hypot(q[0] - p[i][0], q[1] - p[i][1]);
+      }
+    });
+    if (st.feedPaths) {                                    // 回中直線（px 座標）
+      nPaths += st.feedPaths.length;
+      st.feedPaths.forEach(function (p) {
+        lenPx += Math.hypot(p[1][0] - p[0][0], p[1][1] - p[0][1]);
+      });
+    }
+    var totalMm = lenPx * st.mmpp * nLevels;
+    var mins = totalMm / F + nPaths * nLevels * (step / Fz) + nPaths * 0.05;
+    return { mins: mins, levels: nLevels, lenM: totalMm / 1000 };
+  }
+
+  // ── 匯出：座標原點＝髓心，單位 mm，Y 向上（CNC 慣例）──
+  function toMM(rArr) {
+    var pts = [], n = rArr.length;
+    for (var i = 0; i < n; i++) {
+      var th = i * 2 * Math.PI / n;
+      pts.push([Math.cos(th) * rArr[i] * st.mmpp, -Math.sin(th) * rArr[i] * st.mmpp]);
+    }
+    return pts;
+  }
+  function xyToMM(pts) {
+    var S = RingAnalyzer.state(), px = S.pith.x, py = S.pith.y;
+    return pts.map(function (p) { return [(p[0] - px) * st.mmpp, -(p[1] - py) * st.mmpp]; });
+  }
+  function passLayers() {                                  // 每條刀路的（圖層名, mm 點列）
+    if (!st.paths) return [];
+    var np = st.paths.length, out = [];
+    for (var i = 0; i < np; i++) {
+      var name = np === 1 ? 'GROOVE' : (np === 2 ? (i === 0 ? 'GROOVE_IN' : 'GROOVE_OUT') : 'GROOVE_P' + (i + 1));
+      out.push([name, xyToMM(st.paths[i])]);
+    }
+    return out;
+  }
+  function feedLayers() {                                  // 回中凹槽的（圖層名, mm 點列）
+    if (!st.feedPaths) return [];
+    var np = st.feedPaths.length, out = [];
+    for (var i = 0; i < np; i++) {
+      var name = np === 1 ? 'FEED' : (np === 2 ? (i === 0 ? 'FEED_A' : 'FEED_B') : 'FEED_P' + (i + 1));
+      out.push([name, xyToMM(st.feedPaths[i])]);
+    }
+    return out;
+  }
+  function fname(ext) {
+    var id = ($('gtId').value || 'slice').trim() || 'slice';
+    var fd = $('gtFeed').value;
+    return id + '_groove_' + $('gtR0').value + 'mm_W' + $('gtW').value + (fd ? '_feed-' + fd : '') + '.' + ext;
+  }
+  // 雲端模式：由 GAS（HtmlService）服務時，google.script.run 存在 → 匯出改「存到 Drive」
+  var GAS_MODE = (typeof google !== 'undefined' && google.script && google.script.run);
+  // 靜態網址模式（GitHub Pages 等）：不經 GAS 沙箱，但仍把紀錄／檔案 POST 到同一支 GAS 後端。
+  // 網址由建置時注入（window.TX_CLOUD_URL）；沒有就退回第 7 卡手動貼的 Sheet 網址。
+  var CLOUD_URL = (typeof window !== 'undefined' && window.TX_CLOUD_URL) || '';
+  function cloudPost(payload, cb) {
+    var url = CLOUD_URL || ($('gtSheetUrl').value || '').trim();
+    if (!url) { cb({ ok: false, error: '沒有雲端網址' }); return; }
+    var body = JSON.stringify(payload);
+    // text/plain 不觸發 CORS 預檢；GAS 會 302 轉到 googleusercontent 並帶 CORS 標頭，可讀回應
+    fetch(url, { method: 'POST', mode: 'cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body })
+      .then(function (r) { return r.text(); })
+      .then(function (t) { var o; try { o = JSON.parse(t); } catch (e) { o = { ok: true, unverified: true }; } cb(o); })
+      .catch(function () {                              // 讀不到回應：改用 no-cors 盲送（能送到，只是無法確認）
+        fetch(url, { method: 'POST', mode: 'no-cors', body: body })
+          .then(function () { cb({ ok: true, unverified: true }); })
+          .catch(function (e) { cb({ ok: false, error: e.message }); });
+      });
+  }
+  function toast(msg, ok) {
+    var t = document.getElementById('gtToast');
+    if (!t) { t = document.createElement('div'); t.id = 'gtToast';
+      t.style.cssText = 'position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:9999;'
+        + 'background:#17161b;border:1px solid #2b2925;color:#ece8df;padding:12px 20px;border-radius:12px;'
+        + 'font-size:14px;box-shadow:0 8px 30px rgba(0,0,0,.4);max-width:80vw;text-align:center';
+      document.body.appendChild(t); }
+    t.style.borderColor = ok === false ? '#c0554a' : (ok ? '#7ea86a' : '#b07a2e');
+    t.textContent = msg; t.style.display = 'block';
+    clearTimeout(toast._t); toast._t = setTimeout(function () { t.style.display = 'none'; }, 4200);
+  }
+  function toB64(text, cb) {
+    if (text instanceof Blob) { var r = new FileReader(); r.onload = function () { cb(r.result.split(',')[1]); }; r.readAsDataURL(text); }
+    else { cb(btoa(unescape(encodeURIComponent(text)))); }
+  }
+  function download(name, text, mime) {
+    if (GAS_MODE) {                                   // 雲端：存進共用 Drive 輸出資料夾
+      toast('存到雲端中… ' + name);
+      toB64(text, function (b64) {
+        google.script.run
+          .withSuccessHandler(function (res) { toast(res && res.ok ? ('已存到 Drive：' + name) : ('存檔失敗：' + ((res && res.error) || '?')), res && res.ok); })
+          .withFailureHandler(function (e) { toast('存檔失敗：' + e.message, false); })
+          .saveToDrive(name, b64, mime || 'application/octet-stream');
+      });
+      return;
+    }
+    var blob = (text instanceof Blob) ? text : new Blob([text], { type: mime || 'text/plain' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name; a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+    if (CLOUD_URL) {                                  // 靜態雲端模式：下載之外，同一份也存進共用 Drive
+      toast('已下載，同步存到雲端中… ' + name);
+      toB64(text, function (b64) {
+        cloudPost({ action: 'save', name: name, b64: b64, mime: mime || 'application/octet-stream' }, function (res) {
+          toast(res.ok ? (res.unverified ? '已送到雲端：' + name : '已存到 Drive：' + name) : ('雲端存檔失敗：' + (res.error || '?')), res.ok);
+        });
+      });
+    }
+  }
+
+  function exportSVG() {
+    var o = toMM(st.outline), layers = passLayers();
+    var xs = o.map(function (p) { return p[0]; }), ys = o.map(function (p) { return p[1]; });
+    // 對位框：以髓心（原點）為中心的對稱矩形。CAM 軟體（如 Vectric）匯入 SVG 常用
+    // 「圖形外框置中」擺放、不理會檔案原點；髓心偏心的木片會因此整個偏掉。
+    // 讓最外層圖形對髓心對稱，置中之後髓心就必然落在版面正中央。
+    var hw = Math.max(-Math.min.apply(0, xs), Math.max.apply(0, xs)) + 5;
+    var hh = Math.max(-Math.min.apply(0, ys), Math.max.apply(0, ys)) + 5;
+    var minX = -hw, maxX = hw, minY = -hh, maxY = hh;
+    var W = (2 * hw).toFixed(2), H = (2 * hh).toFixed(2);
+    function path(pts) {
+      return 'M ' + pts.map(function (p) { return p[0].toFixed(3) + ' ' + p[1].toFixed(3); }).join(' L ') + ' Z';
+    }
+    var grooves = layers.map(function (L, i) {
+      var col = i % 2 ? '#ff9900' : '#ff6600';
+      return '<g id="' + L[0] + '" fill="none" stroke="' + col + '" stroke-width="0.25"><path d="' + path(L[1]) + '"/></g>';
+    }).join('\n');
+    var feeds = feedLayers().map(function (L, i) {
+      var col = i % 2 ? '#dd66ff' : '#bb33ff';
+      var p = L[1];
+      return '<g id="' + L[0] + '" fill="none" stroke="' + col + '" stroke-width="0.25"><path d="M ' +
+        p.map(function (q) { return q[0].toFixed(3) + ' ' + q[1].toFixed(3); }).join(' L ') + '"/></g>';   // 開放線段，不加 Z
+    }).join('\n');
+    if (feeds) grooves += '\n' + feeds;
+    if (eng.paths && eng.paths.length) {                   // 居民手繪雕刻（座標慣例與其他圖層一致）
+      grooves += '\n<g id="ENGRAVE" fill="none" stroke="#00aaff" stroke-width="0.25">' +
+        eng.paths.map(function (p) {
+          return '<path d="M ' + p.map(function (q) { return q[0].toFixed(3) + ' ' + q[1].toFixed(3); }).join(' L ') + '"/>';
+        }).join('') + '</g>';
+    }
+    var svg = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+      '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + 'mm" height="' + H + 'mm" viewBox="' +
+      minX.toFixed(2) + ' ' + minY.toFixed(2) + ' ' + W + ' ' + H + '">\n' +
+      '<!-- 單位 mm，原點＝髓心，Y 向上已轉為 SVG 座標；GROOVE_* 為刀具中心刀路 -->\n' +
+      '<g id="REG_FRAME" fill="none" stroke="#999999" stroke-width="0.25" stroke-dasharray="2 2">' +
+      '<rect x="' + (-hw).toFixed(2) + '" y="' + (-hh).toFixed(2) + '" width="' + W + '" height="' + H + '"/></g>\n' +
+      '<g id="OUTLINE" fill="none" stroke="#009944" stroke-width="0.25"><path d="' + path(o) + '"/></g>\n' +
+      grooves + '\n' +
+      '<g id="PITH" fill="none" stroke="#0066ff" stroke-width="0.25"><path d="M -3 0 L 3 0 M 0 -3 L 0 3"/></g>\n' +
+      '</svg>\n';
+    download(fname('svg'), svg, 'image/svg+xml');
+  }
+
+  function exportDXF() {
+    var o = toMM(st.outline);
+    function polyline(layer, pts, open) {
+      var s = '0\nPOLYLINE\n8\n' + layer + '\n66\n1\n70\n' + (open ? 0 : 1) + '\n';
+      pts.forEach(function (p) {
+        s += '0\nVERTEX\n8\n' + layer + '\n10\n' + p[0].toFixed(3) + '\n20\n' + p[1].toFixed(3) + '\n30\n0\n';
+      });
+      return s + '0\nSEQEND\n';
+    }
+    function line(layer, x1, y1, x2, y2) {
+      return '0\nLINE\n8\n' + layer + '\n10\n' + x1 + '\n20\n' + y1 + '\n30\n0\n11\n' + x2 + '\n21\n' + y2 + '\n31\n0\n';
+    }
+    var grooves = passLayers().map(function (L) { return polyline(L[0], L[1]); }).join('') +
+                  feedLayers().map(function (L) { return polyline(L[0], L[1], true); }).join('');
+    if (eng.paths) grooves += eng.paths.map(function (p) { return polyline('ENGRAVE', p, true); }).join('');
+    var dxf = '0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n' +
+      '0\nSECTION\n2\nENTITIES\n' +
+      grooves + polyline('OUTLINE', o) +
+      line('PITH', -3, 0, 3, 0) + line('PITH', 0, -3, 0, 3) +
+      '0\nENDSEC\n0\nEOF\n';
+    download(fname('dxf'), dxf, 'application/dxf');
+  }
+
+  // ── 居民手繪雕刻（bonus）──
+  // 紙上手繪 → 二值化（背景用大範圍模糊估計，抗光線不均）→ Zhang–Suen 骨架化
+  // （筆畫有寬度，骨架化取中心線：一筆＝一條刀路，不是描兩側輪廓）→
+  // 走訪骨架連成折線 → 依寬度／位置／旋轉映射到木片 mm 座標（原點＝髓心）。
+  var eng = { raw: null, paths: null };                    // raw：正規化折線；paths：mm 座標
+  [['gtEW','vEW',function(v){return v+' mm';}],['gtEX','vEX',function(v){return v;}],
+   ['gtEY','vEY',function(v){return v;}],['gtERot','vERot',function(v){return v+'°';}]].forEach(function (b) {
+    $(b[0]).addEventListener('input', function () { $(b[1]).textContent = b[2](this.value); mapEngraving(); updateEngraveEstimate(); draw(); });
+  });
+  $('gtEFile').addEventListener('change', function () {
+    var f = this.files && this.files[0]; if (!f) return;
+    if (!st.ready) { $('gtEStatus').textContent = '請先載入木片照片，再上傳手繪圖。'; return; }
+    var rd = new FileReader();                          // data: 網址（GAS 沙箱擋 blob:）
+    rd.onerror = function () { $('gtEStatus').innerHTML = '<span class="bad">讀取手繪圖失敗</span>'; };
+    rd.onload = function () {
+      var img = new Image();
+      img.onerror = function () { $('gtEStatus').innerHTML = '<span class="bad">手繪圖解碼失敗</span>'; };
+      img.onload = function () {
+        try { extractEngraving(img); } catch (err) { $('gtEStatus').innerHTML = '<span class="bad">抽線失敗：' + err.message + '</span>'; }
+      };
+      img.src = rd.result;
+    };
+    rd.readAsDataURL(f);
+  });
+  function extractEngraving(img) {
+    var sc = Math.min(1, 1100 / Math.max(img.naturalWidth, img.naturalHeight));
+    var w2 = Math.round(img.naturalWidth * sc), h2 = Math.round(img.naturalHeight * sc);
+    var c = document.createElement('canvas'); c.width = w2; c.height = h2;
+    var cx = c.getContext('2d'); cx.drawImage(img, 0, 0, w2, h2);
+    var d = cx.getImageData(0, 0, w2, h2).data;
+    var g = new Float32Array(w2 * h2);
+    for (var i = 0; i < w2 * h2; i++) g[i] = 0.299 * d[i*4] + 0.587 * d[i*4+1] + 0.114 * d[i*4+2];
+    // 背景估計：積分影像做大半徑盒狀模糊（半徑＝短邊/10），筆畫＝比局部背景暗 18% 以上
+    var I = new Float64Array((w2 + 1) * (h2 + 1));
+    for (var y = 0; y < h2; y++) for (var x = 0; x < w2; x++)
+      I[(y+1)*(w2+1)+x+1] = g[y*w2+x] + I[y*(w2+1)+x+1] + I[(y+1)*(w2+1)+x] - I[y*(w2+1)+x];
+    var R = Math.max(8, Math.round(Math.min(w2, h2) / 10));
+    var bin = new Uint8Array(w2 * h2);
+    for (var y2 = 0; y2 < h2; y2++) {
+      var y0 = Math.max(0, y2-R), y1 = Math.min(h2-1, y2+R);
+      for (var x2 = 0; x2 < w2; x2++) {
+        var x0 = Math.max(0, x2-R), x1 = Math.min(w2-1, x2+R);
+        var area = (y1-y0+1) * (x1-x0+1);
+        var s = I[(y1+1)*(w2+1)+x1+1] - I[y0*(w2+1)+x1+1] - I[(y1+1)*(w2+1)+x0] + I[y0*(w2+1)+x0];
+        bin[y2*w2+x2] = (g[y2*w2+x2] < (s/area) * 0.87 && g[y2*w2+x2] < 225) ? 1 : 0;
+      }
+    }
+    // Zhang–Suen 細線化
+    var changed = true, guard = 0;
+    function nb(x, y) {
+      var p = [], off = [[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]];
+      for (var k = 0; k < 8; k++) {
+        var xx = x + off[k][0], yy = y + off[k][1];
+        p.push((xx < 0 || yy < 0 || xx >= w2 || yy >= h2) ? 0 : bin[yy*w2+xx]);
+      }
+      return p;
+    }
+    while (changed && guard++ < 80) {
+      changed = false;
+      for (var pass = 0; pass < 2; pass++) {
+        var kill = [];
+        for (var y3 = 1; y3 < h2-1; y3++) for (var x3 = 1; x3 < w2-1; x3++) {
+          if (!bin[y3*w2+x3]) continue;
+          var p = nb(x3, y3), B = p.reduce(function(a,b){return a+b;}, 0);
+          if (B < 2 || B > 6) continue;
+          var A2 = 0;
+          for (var k2 = 0; k2 < 8; k2++) if (!p[k2] && p[(k2+1)%8]) A2++;
+          if (A2 !== 1) continue;
+          if (pass === 0) { if (p[0]*p[2]*p[4] || p[2]*p[4]*p[6]) continue; }
+          else { if (p[0]*p[2]*p[6] || p[0]*p[4]*p[6]) continue; }
+          kill.push(y3*w2+x3);
+        }
+        if (kill.length) { changed = true; for (var k3 = 0; k3 < kill.length; k3++) bin[kill[k3]] = 0; }
+      }
+    }
+    // 走訪骨架 → 折線（先從端點出發走到底，剩下的閉環隨意起點）
+    var deg = new Int8Array(w2 * h2), off8 = [[0,-1],[1,-1],[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1]];
+    for (var y4 = 0; y4 < h2; y4++) for (var x4 = 0; x4 < w2; x4++) {
+      if (!bin[y4*w2+x4]) continue;
+      var dcount = 0;
+      for (var k4 = 0; k4 < 8; k4++) {
+        var xx4 = x4+off8[k4][0], yy4 = y4+off8[k4][1];
+        if (xx4 >= 0 && yy4 >= 0 && xx4 < w2 && yy4 < h2 && bin[yy4*w2+xx4]) dcount++;
+      }
+      deg[y4*w2+x4] = dcount;
+    }
+    var used = new Uint8Array(w2 * h2), paths = [];
+    // 方向連續性走訪：細線化後的骨架在斜線處常出現「假交叉」（8 鄰域度數>2），
+    // 在那裡斷線會把一筆切成碎片。所以不斷線——每步在未走過的鄰居裡挑
+    // 「方向最順」的那個，一路走到沒路為止；其他分支之後從剩餘像素另起一條。
+    function walk(sx, sy) {
+      var path = [[sx, sy]]; used[sy*w2+sx] = 1;
+      var cxp = sx, cyp = sy, pdx = 0, pdy = 0;
+      for (var step = 0; step < 100000; step++) {
+        var nxt = null, bestDot = -9;
+        for (var k5 = 0; k5 < 8; k5++) {
+          var xx5 = cxp+off8[k5][0], yy5 = cyp+off8[k5][1];
+          if (xx5 < 0 || yy5 < 0 || xx5 >= w2 || yy5 >= h2) continue;
+          if (!bin[yy5*w2+xx5] || used[yy5*w2+xx5]) continue;
+          var L5 = Math.hypot(off8[k5][0], off8[k5][1]);
+          var dot = (pdx || pdy) ? (off8[k5][0]*pdx + off8[k5][1]*pdy) / L5 : 0;
+          if (dot > bestDot) { bestDot = dot; nxt = [xx5, yy5]; }
+        }
+        if (!nxt) break;
+        var ndx = nxt[0]-cxp, ndy = nxt[1]-cyp, nL = Math.hypot(ndx, ndy);
+        pdx = ndx/nL; pdy = ndy/nL;
+        used[nxt[1]*w2+nxt[0]] = 1; path.push(nxt);
+        cxp = nxt[0]; cyp = nxt[1];
+      }
+      return path;
+    }
+    for (var y5 = 0; y5 < h2; y5++) for (var x5 = 0; x5 < w2; x5++)
+      if (bin[y5*w2+x5] && !used[y5*w2+x5] && deg[y5*w2+x5] === 1) paths.push(walk(x5, y5));   // 先從端點
+    for (var y6 = 0; y6 < h2; y6++) for (var x6 = 0; x6 < w2; x6++)
+      if (bin[y6*w2+x6] && !used[y6*w2+x6]) paths.push(walk(x6, y6));   // 閉環與分支
+    // 抽稀＋輕平滑，太短的碎片（雜點）丟掉
+    var out = [], minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+    paths.forEach(function (p) {
+      if (p.length < 10) return;
+      var q = [];
+      for (var i2 = 0; i2 < p.length; i2 += 2) q.push(p[i2]);
+      if ((p.length - 1) % 2) q.push(p[p.length-1]);
+      var sm2 = q.map(function (pt, i3) {
+        if (i3 === 0 || i3 === q.length-1) return pt;
+        return [(q[i3-1][0]+pt[0]+q[i3+1][0])/3, (q[i3-1][1]+pt[1]+q[i3+1][1])/3];
+      });
+      sm2.forEach(function (pt) {
+        if (pt[0] < minX) minX = pt[0]; if (pt[0] > maxX) maxX = pt[0];
+        if (pt[1] < minY) minY = pt[1]; if (pt[1] > maxY) maxY = pt[1];
+      });
+      out.push(sm2);
+    });
+    if (!out.length) throw new Error('沒抽到線條——請確認是白紙黑筆、拍清楚');
+    // 正規化：以外框中心為原點、以外框寬為 1
+    var cxm = (minX+maxX)/2, cym = (minY+maxY)/2, spanW = Math.max(1, maxX-minX);
+    eng.raw = { paths: out.map(function (p) { return p.map(function (pt) { return [(pt[0]-cxm)/spanW, (pt[1]-cym)/spanW]; }); }),
+                aspect: (maxY-minY)/spanW };
+    $('gtEStatus').innerHTML = '<span class="good">已抽出 ' + out.length + ' 條線</span>——用寬度／位置／旋轉把它擺到木片上。';
+    $('btnEClear').disabled = $('btnENc').disabled = false;
+    mapEngraving(); updateEngraveEstimate(); draw();
+  }
+  // 正規化折線 → mm 座標（原點＝髓心，Y 向上）
+  function mapEngraving() {
+    if (!eng.raw) { eng.paths = null; return; }
+    var W = Number($('gtEW').value), ox = Number($('gtEX').value), oy = Number($('gtEY').value);
+    var rot = Number($('gtERot').value) * Math.PI / 180, cr = Math.cos(rot), sr = Math.sin(rot);
+    eng.paths = eng.raw.paths.map(function (p) {
+      return p.map(function (pt) {
+        var mx = pt[0] * W, my = -pt[1] * W;               // 影像 y 向下 → mm y 向上
+        return [mx * cr - my * sr + ox, mx * sr + my * cr + oy];
+      });
+    });
+  }
+  function clearEngraving() {
+    eng.raw = null; eng.paths = null;
+    $('gtEStatus').textContent = '已移除。';
+    $('btnEClear').disabled = $('btnENc').disabled = true;
+    $('gtEInfo').textContent = '';
+    draw();
+  }
+  // 雕刻時間即時預估（換參數就更新，不用等匯出）
+  function updateEngraveEstimate() {
+    if (!eng.paths || !eng.paths.length) return;
+    var depth = Number($('gtEDepth').value), step = Number($('gtStepDown').value);
+    var F = Number($('gtFxy').value), Fz = Number($('gtFz').value);
+    if (!(depth > 0) || !(step > 0) || !(F > 0) || !(Fz > 0)) return;
+    var nLevels = Math.max(1, Math.ceil(depth / step - 1e-9));
+    var len = 0;
+    eng.paths.forEach(function (p) {
+      for (var i = 1; i < p.length; i++) len += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+    });
+    var mins = len * nLevels / F + eng.paths.length * nLevels * (step / Fz + 0.05);
+    $('gtEInfo').innerHTML = eng.paths.length + ' 條線，切削 ' + (len * nLevels / 1000).toFixed(2) +
+      ' m，預估雕刻時間：<b>約 ' + Math.ceil(mins) + ' 分鐘</b>（深 ' + depth + 'mm）。';
+  }
+  function exportEngraveGcode() {
+    if (!eng.paths || !eng.paths.length) return;
+    var depth = Number($('gtEDepth').value), step = Number($('gtStepDown').value);
+    var F = Number($('gtFxy').value), Fz = Number($('gtFz').value);
+    var safe = Number($('gtSafe').value), rpm = Number($('gtRpm').value);
+    function f3(v) { return (Math.abs(v) < 5e-4 ? 0 : v).toFixed(3); }
+    var levels = [];
+    for (var z = step; z < depth - 1e-9; z += step) levels.push(-z);
+    levels.push(-depth);
+    var g = [], cutLen = 0;
+    g.push('; ' + fname('nc').replace('.nc', '_engrave.nc') + '（居民手繪雕刻——請先換雕刻刀再跑）');
+    g.push('; 原點=髓心 X0 Y0, Z0=木片上表面, 單位 mm, 深 ' + depth + 'mm');
+    g.push('G21'); g.push('G90'); g.push('G0 Z' + f3(safe)); g.push('M3 S' + Math.round(rpm));
+    eng.paths.forEach(function (p, pi) {
+      g.push('; ── 線 ' + (pi + 1) + '（' + p.length + ' 點）');
+      levels.forEach(function (zl) {
+        g.push('G0 X' + f3(p[0][0]) + ' Y' + f3(p[0][1]));
+        g.push('G1 Z' + f3(zl) + ' F' + Fz);
+        for (var i = 1; i < p.length; i++) {
+          g.push('G1 X' + f3(p[i][0]) + ' Y' + f3(p[i][1]) + (i === 1 ? ' F' + F : ''));
+          cutLen += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+        }
+        g.push('G0 Z' + f3(safe));
+      });
+    });
+    g.push('M5'); g.push('G0 Z' + f3(safe)); g.push('M2');
+    var name = (($('gtId').value || 'slice').trim() || 'slice') + '_engrave_D' + depth + 'mm.nc';
+    download(name, g.join('\n') + '\n', 'text/plain');
+    $('gtEInfo').innerHTML = '已產生：' + eng.paths.length + ' 條線，切削總長 ' + (cutLen/1000).toFixed(2) + ' m，預估約 <b>' +
+      Math.ceil(cutLen / F + eng.paths.length * levels.length * (step / Fz + 0.05)) + ' 分鐘</b>。';
+  }
+
+  // ── G-code：直接給 Carvera Air 執行（Smoothieware/GRBL 通用指令集）──
+  // 只輸出真正要切的線：GROOVE（封閉圈，每層繞一圈接著往下）＋ FEED（開放線，來回換向下刀）。
+  // 原點＝髓心，Z0＝木片上表面，負 Z 往下切。
+  // 共用刀路產生：dialect 決定方言
+  //  nc  ＝ Smoothieware/GRBL（Carvera Air）：分號註解、M2 結束、不包 %
+  //  tap ＝ Mach3（台灣三軸 6090）：括號註解、% 包夾、M30 結束、加安全指令列
+  function buildGroove(dialect) {
+    var depth = Number($('gtDepth').value), step = Number($('gtStepDown').value);
+    var F = Number($('gtFxy').value), Fz = Number($('gtFz').value);
+    var safe = Number($('gtSafe').value), rpm = Number($('gtRpm').value);
+    if (!(depth > 0) || !(step > 0) || !(F > 0)) return null;
+    var tap = (dialect === 'tap'), ext = tap ? 'tap' : 'nc';
+    function f3(v) { return (Math.abs(v) < 5e-4 ? 0 : v).toFixed(3); }
+    function cm(s) { return tap ? '(' + s.replace(/[()]/g, ' ') + ')' : '; ' + s; }  // 括號內不能再有括號
+    var levels = [];
+    for (var z = step; z < depth - 1e-9; z += step) levels.push(-z);
+    levels.push(-depth);
+    var g = [], cutLen = 0, plunges = 0;
+    if (tap) g.push('%');
+    g.push(cm(fname(ext)));
+    g.push(cm('原點=髓心 X0 Y0, Z0=木片上表面, 單位 mm'));
+    g.push(cm('刀徑 ' + $('gtBit').value + 'mm, 槽寬 ' + $('gtW').value + 'mm, 深 ' + depth + 'mm, 每層 ' + step + 'mm, ' + levels.length + ' 層'));
+    g.push('G21'); g.push('G90');
+    if (tap) g.push('G17 G40 G49 G80');                   // Mach3 安全起始：XY 平面、取消刀補/刀長補償/固定循環
+    g.push('G0 Z' + f3(safe));
+    g.push('M3 S' + Math.round(rpm));
+    function segLen(a, b) { return Math.hypot(b[0] - a[0], b[1] - a[1]); }
+    passLayers().forEach(function (L) {                    // 封閉圈
+      var pts = L[1], n = pts.length, per = 0;
+      for (var i = 0; i < n; i++) per += segLen(pts[i], pts[(i + 1) % n]);
+      g.push(cm('-- ' + L[0] + ' 封閉，一圈 ' + per.toFixed(0) + 'mm'));
+      g.push('G0 X' + f3(pts[0][0]) + ' Y' + f3(pts[0][1]));
+      levels.forEach(function (zl) {
+        g.push('G1 Z' + f3(zl) + ' F' + Fz); plunges++;
+        for (var i2 = 1; i2 <= n; i2++) { var p = pts[i2 % n];
+          g.push('G1 X' + f3(p[0]) + ' Y' + f3(p[1]) + (i2 === 1 ? ' F' + F : '')); }
+        cutLen += per;
+      });
+      g.push('G0 Z' + f3(safe));
+    });
+    feedLayers().forEach(function (L) {                    // 開放直線
+      var a = L[1][0], b2 = L[1][L[1].length - 1], len = segLen(a, b2);
+      g.push(cm('-- ' + L[0] + ' 開放直線 ' + len.toFixed(0) + 'mm'));
+      g.push('G0 X' + f3(a[0]) + ' Y' + f3(a[1]));
+      var atA = true;
+      levels.forEach(function (zl) {
+        g.push('G1 Z' + f3(zl) + ' F' + Fz); plunges++;
+        var to = atA ? b2 : a;
+        g.push('G1 X' + f3(to[0]) + ' Y' + f3(to[1]) + ' F' + F);
+        atA = !atA; cutLen += len;
+      });
+      g.push('G0 Z' + f3(safe));
+    });
+    g.push('M5');
+    g.push('G0 Z' + f3(safe));
+    g.push(tap ? 'M30' : 'M2');
+    if (tap) g.push('%');
+    return { text: g.join('\n') + '\n', cutLen: cutLen, levels: levels.length, plunges: plunges, step: step, F: F, Fz: Fz, ext: ext };
+  }
+  function reportGcode(r, label) {
+    var mins = r.cutLen / r.F + r.plunges * (r.step / r.Fz);
+    $('gtGInfo').innerHTML = '已產生 <b>' + label + '</b>：切削總長 ' + (r.cutLen / 1000).toFixed(1) + ' m，' + r.levels +
+      ' 層，預估切削時間約 <b>' + Math.ceil(mins) + ' 分鐘</b>（不含手動換刀與對零）。';
+  }
+  function exportGcode() {
+    var r = buildGroove('nc'); if (!r) { $('gtGInfo').textContent = '深度／每層／進給要大於 0'; return; }
+    download(fname('nc'), r.text, 'text/plain'); reportGcode(r, 'G-code (.nc)');
+  }
+  function exportTap() {
+    var r = buildGroove('tap'); if (!r) { $('gtGInfo').textContent = '深度／每層／進給要大於 0'; return; }
+    download(fname('tap'), r.text, 'text/plain'); reportGcode(r, 'Tap (.tap · Mach3)');
+  }
+
+  function exportPNG() {
+    $('gtCv').toBlob(function (b) {
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = fname('png'); a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+    }, 'image/png');
+  }
+
+  // ── 設定檔：存／讀所有參數（不含木片編號與照片）──
+  // 預設值版號：改了 HTML 預設（深度 6／平滑 100%／回中＝上）就 +1，舊的自動記住設定會把這幾項換成新預設
+  var DEFV = 3, DEF_MIGRATE = ['gtDepth', 'gtSmooth', 'gtFeed'];
+  var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
+    'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth'];
+  function collectConfig() {
+    var o = { _tool: '年輪凹槽工具', _ver: 'r11-0907', _defv: DEFV };
+    CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
+    return o;
+  }
+  function applyConfig(o, silent) {
+    if (!o) return;
+    CFG_KEYS.forEach(function (k) {
+      if (o[k] == null) return;
+      var el = $(k); if (!el) return;
+      el.value = o[k];
+      // 觸發顯示更新（滑桿旁的數值標籤）
+      el.dispatchEvent(new Event('input')); el.dispatchEvent(new Event('change'));
+    });
+    if (!silent) $('gtCfgInfo').innerHTML = '<span style="color:var(--ok)">已套用設定檔。</span>';
+    if (st.img) recompute();
+  }
+  function saveConfig() {
+    download('凹槽設定_' + (($('gtId').value || '').trim() || '預設') + '.json',
+      JSON.stringify(collectConfig(), null, 2), 'application/json');
+    $('gtCfgInfo').innerHTML = '<span style="color:var(--ok)">已下載設定檔。</span>';
+  }
+  $('gtCfgFile').addEventListener('change', function () {
+    var f = this.files && this.files[0]; if (!f) return;
+    var rd = new FileReader();
+    rd.onload = function () {
+      try { applyConfig(JSON.parse(rd.result)); rememberNow(); }
+      catch (e) { $('gtCfgInfo').innerHTML = '<span class="bad">讀取失敗：不是有效的設定檔</span>'; }
+    };
+    rd.readAsText(f);
+    this.value = '';
+  });
+  // 自動記住（localStorage；沙箱／預覽讀不到就靜默略過）
+  function rememberNow() {
+    if (!$('gtRemember').checked) return;
+    try { localStorage.setItem('grooveCfg', JSON.stringify(collectConfig())); } catch (e) {}
+  }
+  CFG_KEYS.concat(['gtRemember']).forEach(function (k) {
+    var el = $(k); if (el) { el.addEventListener('change', rememberNow); el.addEventListener('input', rememberNow); }
+  });
+  (function restoreRemembered() {
+    try {
+      var raw = localStorage.getItem('grooveCfg');
+      if (raw) {
+        var o = JSON.parse(raw);
+        if (o._defv !== DEFV) { DEF_MIGRATE.forEach(function (k) { delete o[k]; }); }   // 舊設定：這幾項改用新預設
+        applyConfig(o, true);
+        if (o._defv !== DEFV) rememberNow();
+      }
+    } catch (e) {}
+  })();
+
+  // ── 記錄到 Sheet（選用；沒填網址就純離線）──
+  (function restoreUrl() { try { var u = localStorage.getItem('grooveSheetUrl'); if (u) $('gtSheetUrl').value = u; } catch (e) {} })();
+  $('gtSheetUrl').addEventListener('change', function () { try { localStorage.setItem('grooveSheetUrl', this.value.trim()); } catch (e) {} });
+  // ── 本機尺寸紀錄（離線，存 localStorage）──
+  function loadSizes() { try { return JSON.parse(localStorage.getItem('grooveSizes') || '[]'); } catch (e) { return []; } }
+  function saveSizes(a) { try { localStorage.setItem('grooveSizes', JSON.stringify(a)); } catch (e) {} }
+  function refreshSizeInfo() {
+    var a = loadSizes();
+    $('gtSizeInfo').textContent = a.length ? ('本機尺寸紀錄：已存 ' + a.length + ' 片') : '本機尺寸紀錄：尚無（按「記錄這片」開始）';
+  }
+  // 這片的完整設定＋計算結果（本機尺寸紀錄與雲端表共用同一份）
+  var PARAM_COLS = [['機台', 'machine'], ['凹槽直徑mm', 'r0'], ['帶寬mm', 'band'], ['跟隨%', 'follow'], ['平滑%', 'smooth'],
+    ['槽寬mm', 'width'], ['刀徑mm', 'bit'], ['回中方向', 'feed'], ['深度mm', 'depth'], ['每層mm', 'stepDown'],
+    ['進給', 'fxy'], ['下刀速', 'fz'], ['轉速', 'rpm'], ['最小凹半徑mm', 'minRadius'], ['預估分鐘', 'estMin'],
+    ['工具版本', 'ver'], ['備註', 'note']];
+  function collectParams() {
+    var est = (st.ready && st.curve) ? grooveTimeEstimate() : null;
+    return {
+      id: ($('gtId').value || '').trim(), temp: '', machine: $('gtMachine').value,
+      dia: $('gtDia').value, diaMin: $('gtDiaMin').value, r0: $('gtR0').value,
+      band: $('gtBand').value, follow: $('gtFollow').value, smooth: $('gtSmooth').value,
+      width: $('gtW').value, bit: $('gtBit').value, feed: ({ up: '上', down: '下', left: '左', right: '右' })[$('gtFeed').value] || '無',
+      depth: $('gtDepth').value, stepDown: $('gtStepDown').value, fxy: $('gtFxy').value,
+      fz: $('gtFz').value, rpm: $('gtRpm').value,
+      heart: (st.heartRatio != null ? st.heartRatio.toFixed(3) : ''),
+      minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
+      estMin: (est ? Math.ceil(est.mins) : ''),
+      estMinor: (st.estMinor != null ? st.estMinor : ''),
+      ver: 'r11-0907', note: ($('gtRecNote').value || '').trim()
+    };
+  }
+  function logSize() {
+    var id = ($('gtId').value || '').trim();
+    if (!id) return { ok: false, msg: '請先填木片編號（尺寸紀錄要用它當鑰匙）' };
+    var major = Number($('gtDia').value);
+    if (!(major > 0)) return { ok: false, msg: '請先填最長直徑（長軸）' };
+    var minorV = ($('gtDiaMin').value || '').trim(), src, minor;
+    if (minorV && Number(minorV) > 0) { minor = Number(minorV); src = '實測'; }
+    else { minor = Number($('gtDiaMin').placeholder) || ''; src = '照片估算'; }
+    var a = loadSizes(), i = a.findIndex(function (x) { return x.id === id; }), row = {
+      id: id, major: major, minor: minor, src: src,
+      estMinor: (st.estMinor != null ? st.estMinor : ''),
+      heart: (st.heartRatio != null ? +st.heartRatio.toFixed(3) : ''),
+      ts: new Date().toISOString().slice(0, 19).replace('T', ' '),
+      params: collectParams()                               // 這片當時的全部設定＋計算結果
+    };
+    if (i >= 0) a[i] = row; else a.push(row);
+    saveSizes(a); refreshSizeInfo();
+    return { ok: true, replaced: i >= 0, row: row };
+  }
+  function exportSizes() {
+    var a = loadSizes();
+    if (!a.length) { $('gtSizeInfo').innerHTML = '<span class="bad">還沒有任何尺寸紀錄</span>'; return; }
+    a.sort(function (p, q) { return String(p.id).replace(/\d+/g, function (n) { return n.padStart(6, '0'); })
+      .localeCompare(String(q.id).replace(/\d+/g, function (n) { return n.padStart(6, '0'); })); });
+    var rows = [['編號', '長軸mm', '短軸mm', '短軸來源', '照片估短軸mm', '心材比例', '時間'].concat(PARAM_COLS.map(function (c) { return c[0]; }))];
+    a.forEach(function (x) {
+      var p = x.params || {};
+      rows.push([x.id, x.major, x.minor, x.src, (x.estMinor != null ? x.estMinor : ''), x.heart, x.ts]
+        .concat(PARAM_COLS.map(function (c) { return p[c[1]] != null ? p[c[1]] : ''; })));
+    });
+    var csv = '﻿' + rows.map(function (r) { return r.join(','); }).join('\n');
+    download('木片尺寸表_' + a.length + '片.csv', new Blob([csv], { type: 'text/csv' }));
+  }
+  function clearSizes() {
+    if ($('btnSizeClr').dataset.armed !== '1') { $('btnSizeClr').dataset.armed = '1'; $('btnSizeClr').textContent = '再按一次＝確定清空';
+      setTimeout(function () { $('btnSizeClr').dataset.armed = '0'; $('btnSizeClr').textContent = '清空本機紀錄'; }, 4000); return; }
+    saveSizes([]); $('btnSizeClr').dataset.armed = '0'; $('btnSizeClr').textContent = '清空本機紀錄'; refreshSizeInfo();
+  }
+
+  function recordToSheet() {
+    if (!st.ready || !st.curve) { $('gtRecInfo').innerHTML = '<span class="bad">請先載入照片、產生凹槽曲線再記錄</span>'; return; }
+    // 1) 先存本機尺寸紀錄（離線一定成功）
+    var sz = logSize();
+    if (!sz.ok) { $('gtRecInfo').innerHTML = '<span class="bad">' + sz.msg + '</span>'; return; }
+    $('gtRecInfo').innerHTML = '<span style="color:var(--ok)">已' + (sz.replaced ? '更新' : '記錄') + '「' + sz.row.id
+      + '」尺寸：長軸 ' + sz.row.major + '／短軸 ' + sz.row.minor + ' mm（' + sz.row.src + '）</span>';
+    // 2) 收集這片的完整參數＋計算結果
+    var data = collectParams();
+    data.id = sz.row.id; data.diaMin = sz.row.minor; data.minorSrc = sz.row.src; data.estMinor = sz.row.estMinor;
+    var baseMsg = $('gtRecInfo').innerHTML;
+    // 2a) 雲端模式：直接呼叫同專案的 logCut（免網址、免 CORS）
+    if (GAS_MODE) {
+      $('btnRec').disabled = true;
+      google.script.run
+        .withSuccessHandler(function (res) {
+          $('gtRecInfo').innerHTML = baseMsg + '<br><span style="color:var(--ok)">· 已寫入雲端表（第 ' + ((res && res.row) || '?') + ' 列，' + (res && res.updated ? '更新' : '新增') + '）</span>';
+          $('btnRec').disabled = false;
+        })
+        .withFailureHandler(function (e) {
+          $('gtRecInfo').innerHTML = baseMsg + '<br><span class="bad">· 雲端寫入失敗：' + e.message + '（本機尺寸已存）</span>';
+          $('btnRec').disabled = false;
+        })
+        .logCut(data);
+      return;
+    }
+    // 2b) 靜態網址／檔案模式：POST 到 GAS 後端（建置注入的網址，或第 7 卡貼的網址）
+    var url = CLOUD_URL || ($('gtSheetUrl').value || '').trim();
+    if (!url) return;
+    if (!CLOUD_URL && !/^https:\/\/script\.google\.com\/.*\/exec$/.test(url)) {   // 手動貼的才檢查格式
+      $('gtRecInfo').innerHTML += '<br><span class="bad">（Sheet 網址格式不對，未送出；本機尺寸已存）</span>'; return;
+    }
+    $('btnRec').disabled = true;
+    cloudPost({ action: 'log', data: data }, function (res) {
+      if (res.ok && !res.unverified) $('gtRecInfo').innerHTML = baseMsg + '<br><span style="color:var(--ok)">· 已寫入雲端表（第 ' + (res.row || '?') + ' 列，' + (res.updated ? '更新' : '新增') + '）</span>';
+      else if (res.ok) $('gtRecInfo').innerHTML = baseMsg + '<br><span style="color:var(--ok)">· 已送到雲端表（請開表確認）</span>';
+      else $('gtRecInfo').innerHTML = baseMsg + '<br><span class="bad">· 雲端寫入失敗：' + (res.error || '?') + '（本機尺寸已存）</span>';
+      $('btnRec').disabled = false;
+    });
+  }
+  refreshSizeInfo();
+  if (GAS_MODE || CLOUD_URL) {                      // 雲端版：提示＋隱藏不需要的欄位
+    var sub = document.querySelector('.sub');
+    if (sub) sub.innerHTML += GAS_MODE ? ' <b style="color:#7ea86a">· 雲端版（匯出＝存到共用 Drive）</b>'
+                                      : ' <b style="color:#7ea86a">· 雲端版（匯出＝下載＋存共用 Drive；記錄＝寫入雲端表）</b>';
+    var su = $('gtSheetUrl');
+    if (su) { su.style.display = 'none'; if (su.previousElementSibling) su.previousElementSibling.style.display = 'none'; }
+    var btn = $('btnRec'); if (btn) btn.textContent = '記錄這片（存尺寸＋寫入雲端表）';
+  }
+
+  return { exportSVG: exportSVG, exportDXF: exportDXF, exportPNG: exportPNG, exportGcode: exportGcode,
+           clearEngraving: clearEngraving, exportEngraveGcode: exportEngraveGcode,
+           detectAllRings: detectAllRings, exportTap: exportTap,
+           saveConfig: saveConfig, recordToSheet: recordToSheet,
+           exportSizes: exportSizes, clearSizes: clearSizes };
+})();
+</script>
+</div>
+
+</body>
+</html>
