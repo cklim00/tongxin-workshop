@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r12-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r13-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -1552,16 +1552,39 @@ var GT = (function () {
   function schedule() { if (!st.img) return; clearTimeout(timer); timer = setTimeout(recompute, 120); }
 
   // ── 載入照片 ──
+  // iPhone 預設拍出 HEIC，Chrome／Windows／Android 都解不開，<img> 會直接失敗。
+  // 偵測到 HEIC 就先用 heic2any（libheif wasm，從 CDN 載）轉成 JPEG 再走正常流程；
+  // 轉不成就明講「請改存 JPG」，不會再無聲卡住。
+  function isHeic(f) { return /image\/hei[cf]/i.test(f.type || '') || /\.hei[cf]$/i.test(f.name || ''); }
+  function loadScript(url) { return new Promise(function (res, rej) { var s = document.createElement('script'); s.src = url; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
+  function heicToJpeg(f) {
+    var p = (typeof heic2any === 'function') ? Promise.resolve()
+      : loadScript('https://cdn.jsdelivr.net/npm/heic2any@0.0.4/dist/heic2any.min.js')
+          .catch(function () { return loadScript('https://unpkg.com/heic2any@0.0.4/dist/heic2any.min.js'); });
+    return p.then(function () { return heic2any({ blob: f, toType: 'image/jpeg', quality: 0.92 }); })
+            .then(function (b) { return Array.isArray(b) ? b[0] : b; });
+  }
   $('gtFile').addEventListener('change', function () {
     var f = this.files && this.files[0]; if (!f) return;
     info('<span style="color:var(--accent)">讀取照片中…</span>');   // 立刻回饋，避免看起來像當掉
+    if (isHeic(f)) {
+      info('<span style="color:var(--accent)">這是 iPhone 的 HEIC 格式，轉成 JPEG 中…（約 3–8 秒，需要網路）</span>');
+      heicToJpeg(f).then(function (jpg) { readPhoto(jpg); })
+        .catch(function () {
+          info('<span class="bad">HEIC 轉檔失敗。請改用 JPG：iPhone「設定 → 相機 → 格式 → 最相容」再重拍，或用手機把照片「分享／另存」成 JPG 後再上傳。</span>');
+        });
+      return;
+    }
+    readPhoto(f);
+  });
+  function readPhoto(f) {
     // 用 FileReader 讀成 data: 網址，不用 blob: 物件網址——GAS 的 HtmlService
     // 沙箱 iframe 會封鎖 blob:，導致 onload 永不觸發、照片載不進來（就是「選了照片卻卡住」）。
     var rd = new FileReader();
     rd.onerror = function () { info('<span class="bad">讀取照片失敗，請重試或換一張</span>'); };
     rd.onload = function () {
       var img = new Image();
-      img.onerror = function () { info('<span class="bad">照片解碼失敗，請換一張</span>'); };
+      img.onerror = function () { info('<span class="bad">照片解碼失敗（瀏覽器打不開這種格式）。請改用 JPG 或 PNG；iPhone 請到「設定 → 相機 → 格式 → 最相容」。</span>'); };
       img.onload = function () {
         function go(im) {
           st.img = im;
@@ -1590,7 +1613,7 @@ var GT = (function () {
       img.src = rd.result;   // data: 網址，沙箱可用
     };
     rd.readAsDataURL(f);
-  });
+  }
 
   // ── 畫布互動：按在曲線附近＝拖曳修形（雕塑式，局部變形）；按在別處＝設髓心 ──
   // 演算法起稿之後，最後一哩由人來定：拖著曲線就能把它按到您眼睛選的那條年輪上。
@@ -3061,7 +3084,7 @@ var GT = (function () {
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
     'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r12-0907', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r13-0907', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3140,7 +3163,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r12-0907', note: ($('gtRecNote').value || '').trim()
+      ver: 'r13-0907', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
