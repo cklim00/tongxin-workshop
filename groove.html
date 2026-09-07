@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r15-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r16-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -1392,15 +1392,15 @@ var RingAnalyzer = (function () {
   <div id="gtSide">
     <div class="gtCard">
       <h2>1｜照片與比例尺</h2>
+      <label>木片編號 <span class="val" id="vIdSize">（輸入後自動帶入雲端量測的長短軸）</span></label>
+      <input type="text" id="gtId" placeholder="例如 3-1" autocomplete="off">
       <button class="pri" onclick="document.getElementById('gtFile').click()">選擇木片照片</button>
       <input type="file" id="gtFile" accept="image/*" style="display:none">
       <label>這片木片的實測<b>最長</b>直徑（mm）＊卡尺量</label>
       <input type="number" id="gtDia" value="150" min="50" max="400" step="0.5">
       <label>實測<b>最短</b>直徑（mm，選填＊用來檢查斜拍）<span class="val" id="vDiaMin">—</span></label>
       <input type="number" id="gtDiaMin" placeholder="選填" min="30" max="400" step="0.5">
-      <div class="gtHint">輸入最長直徑後，灰字自動顯示<b>照片換算的短軸</b>；卡尺實測後填進來，系統會比對兩者檢查是否斜拍。</div>
-      <label>木片編號（用於檔名，可空）</label>
-      <input type="text" id="gtId" placeholder="TR-U00-S004">
+      <div class="gtHint">先打<b>木片編號</b>：雲端「木片尺寸」分頁有這片的量測值，長短軸就自動填好（可再手改）。沒有的話再自己用卡尺量。輸入最長直徑後，灰字會顯示<b>照片換算的短軸</b>，與實測比對可檢查是否斜拍。</div>
       <div class="gtHint">橢圓木片也可以：比例尺只用<b>最長直徑</b>；凹槽會沿木片形狀走成橢圓。最短直徑選填——填了會拿來核對照片是否斜拍。照片務必<b>正上方垂直拍</b>。<b>點</b>影像空白處＝修正髓心；<b>抓住曲線拖曳</b>＝手動修形（放手後刀路自動更新；調整任何滑桿會重新起稿、覆蓋手動修形）。</div>
     </div>
 
@@ -2687,6 +2687,39 @@ var GT = (function () {
           .catch(function (e) { cb({ ok: false, error: e.message }); });
       });
   }
+  // 依木片編號向雲端「木片尺寸」分頁查長短軸，找到就填進欄位（GET JSON；失敗退 POST）
+  function cloudLookup(id) {
+    var url = CLOUD_URL || ($('gtSheetUrl').value || '').trim();
+    if (!url) return Promise.resolve({ ok: false, error: '無雲端' });
+    if (GAS_MODE) return new Promise(function (res) { google.script.run.withSuccessHandler(res).withFailureHandler(function (e) { res({ ok: false, error: e.message }); }).getSize(id); });
+    return fetch(url + '?action=size&id=' + encodeURIComponent(id), { method: 'GET', mode: 'cors' })
+      .then(function (r) { return r.json(); })
+      .catch(function () { return new Promise(function (res) { cloudPost({ action: 'size', id: id }, res); }); });
+  }
+  var _lookupTimer = null, _lastLookup = '';
+  function lookupSizeById(force) {
+    var id = ($('gtId').value || '').trim(), tag = $('vIdSize');
+    if (!id) { tag.textContent = '（輸入後自動帶入雲端量測的長短軸）'; return; }
+    if (!force && id === _lastLookup) return;
+    _lastLookup = id;
+    if (!CLOUD_ON) { tag.textContent = ''; return; }
+    tag.textContent = '查雲端尺寸中…';
+    cloudLookup(id).then(function (r) {
+      if (($('gtId').value || '').trim() !== id) return;            // 使用者又改了編號
+      if (!r || !r.ok) { tag.textContent = '雲端查不到（' + (r && r.error || '連線失敗') + '），請手量'; return; }
+      if (!r.found || r.major == null) { tag.textContent = '雲端沒有 ' + id + ' 的量測值，請用卡尺量'; return; }
+      $('gtDia').value = r.major;
+      if (r.minor != null) $('gtDiaMin').value = r.minor;
+      st.sizeFrom = '雲端量測';
+      tag.innerHTML = '<span style="color:var(--ok)">已帶入 ' + id + '：長軸 ' + r.major + (r.minor != null ? '／短軸 ' + r.minor : '') + ' mm' + (r.note ? '（' + r.note + '）' : '') + '</span>';
+      if (st.img) analyze();                                       // 已有照片→用新比例尺重算
+    });
+  }
+  $('gtId').addEventListener('change', function () { lookupSizeById(false); });
+  $('gtId').addEventListener('input', function () { clearTimeout(_lookupTimer); _lookupTimer = setTimeout(function () { lookupSizeById(false); }, 700); });
+  $('gtId').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); lookupSizeById(true); } });
+  $('gtDia').addEventListener('input', function () { st.sizeFrom = null; });
+  $('gtDiaMin').addEventListener('input', function () { st.sizeFrom = null; });
   function toast(msg, ok) {
     var t = document.getElementById('gtToast');
     if (!t) { t = document.createElement('div'); t.id = 'gtToast';
@@ -3113,7 +3146,7 @@ var GT = (function () {
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
     'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r15-0907', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r16-0907', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3192,7 +3225,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r15-0907', note: ($('gtRecNote').value || '').trim()
+      ver: 'r16-0907', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
@@ -3201,7 +3234,7 @@ var GT = (function () {
     var major = Number($('gtDia').value);
     if (!(major > 0)) return { ok: false, msg: '請先填最長直徑（長軸）' };
     var minorV = ($('gtDiaMin').value || '').trim(), src, minor;
-    if (minorV && Number(minorV) > 0) { minor = Number(minorV); src = '實測'; }
+    if (minorV && Number(minorV) > 0) { minor = Number(minorV); src = st.sizeFrom || '實測'; }
     else { minor = Number($('gtDiaMin').placeholder) || ''; src = '照片估算'; }
     var a = loadSizes(), i = a.findIndex(function (x) { return x.id === id; }), row = {
       id: id, major: major, minor: minor, src: src,
