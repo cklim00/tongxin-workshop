@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>年輪凹槽曲線工具</title></head>
 <body style="margin:0">
-<script>window.TX_CLOUD_URL="https://script.google.com/macros/s/AKfycbx0YCgILmuunoEoaNQhhVjrGJ6_ddTQ2CXhVqTjrcDh3-7IYOgmWf4PCSlUf6ZWFGez/exec";</script>
+<script>window.TX_CLOUD_URL="https://script.google.com/macros/s/AKfycbx0YCgILmuunoEoaNQhhVjrGJ6_ddTQ2CXhVqTjrcDh3-7IYOgmWf4PCSlUf6ZWFGez/exec";window.TX_SHEET_URL="https://docs.google.com/spreadsheets/d/1WAeGrh9Ruq9lGl5H5hllC8jRYBilP6rrfrPyC9hxedc";window.TX_FOLDER_URL="https://drive.google.com/drive/folders/1fCLmBNl1hMRzksaaP13ntPLcWqgNcbuP";</script>
 <script>
 /* ═══════════════════════════════════════════════════════════════
    《同心石光》M2 Ring Analyzer — 瀏覽器端年輪特徵擷取
@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r13-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r14-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -1517,7 +1517,7 @@ var RingAnalyzer = (function () {
         <button id="btnSizeCsv" onclick="GT.exportSizes()">匯出尺寸表 CSV</button>
         <button id="btnSizeClr" onclick="GT.clearSizes()">清空本機紀錄</button>
       </div>
-      <div class="gtHint">按「記錄這片」就會把 <b>編號＋長軸＋短軸</b> 存進這台電腦的瀏覽器（離線也行）；短軸沒用卡尺量，就自動用<b>照片換算值</b>補上。全部切完，按「匯出尺寸表 CSV」把 200 片的尺寸給我，就能接進亮燈模擬的真實比例。若另外填了 Sheet 網址，會同時送一列完整參數到 Google Sheet。<b>編號必填</b>（當作每片的鑰匙）。</div>
+      <div class="gtHint">按「記錄這片」一鍵做三件事：① 這片的尺寸存進這台電腦（離線也行）；② 完整參數寫進<b>雲端總表</b>（Google Sheet，一片一列，同編號再按＝覆蓋更新）；③ svg／dxf／png／G-code／tap <b>五個檔全部存進雲端資料夾</b>「同心石光_CNC輸出／木片編號／」。旁邊的「匯出尺寸表 CSV」只是把這台電腦的紀錄下載成一個檔備份，不影響雲端。<b>木片編號必填</b>（當作每片的鑰匙）。</div>
     </div>
   </div>
 </div>
@@ -2702,33 +2702,61 @@ var GT = (function () {
     if (text instanceof Blob) { var r = new FileReader(); r.onload = function () { cb(r.result.split(',')[1]); }; r.readAsDataURL(text); }
     else { cb(btoa(unescape(encodeURIComponent(text)))); }
   }
-  function download(name, text, mime) {
-    if (GAS_MODE) {                                   // 雲端：存進共用 Drive 輸出資料夾
-      toast('存到雲端中… ' + name);
-      toB64(text, function (b64) {
-        google.script.run
-          .withSuccessHandler(function (res) { toast(res && res.ok ? ('已存到 Drive：' + name) : ('存檔失敗：' + ((res && res.error) || '?')), res && res.ok); })
-          .withFailureHandler(function (e) { toast('存檔失敗：' + e.message, false); })
-          .saveToDrive(name, b64, mime || 'application/octet-stream', ($('gtId').value || '').trim());
+  var CLOUD_ON = !!(GAS_MODE || CLOUD_URL);
+  // 把一個檔存進共用 Drive／<木片編號>／。回 Promise<{ok,error,unverified}>。GAS 沙箱與靜態網址兩種後端都走這裡。
+  function cloudSave(name, data, mime) {
+    return new Promise(function (resolve) {
+      if (!CLOUD_ON) { resolve({ ok: false, error: '無雲端' }); return; }
+      var sub = ($('gtId').value || '').trim();
+      toB64(data, function (b64) {
+        if (GAS_MODE) {
+          google.script.run
+            .withSuccessHandler(function (res) { resolve(res || { ok: false, error: '?' }); })
+            .withFailureHandler(function (e) { resolve({ ok: false, error: e.message }); })
+            .saveToDrive(name, b64, mime || 'application/octet-stream', sub);
+        } else {
+          cloudPost({ action: 'save', name: name, b64: b64, mime: mime || 'application/octet-stream', sub: sub }, resolve);
+        }
       });
-      return;
+    });
+  }
+  // localOnly=true：只下載到本機（設定檔、尺寸表 CSV 這類個人備份），不放雲端，免得資料夾一堆雜檔
+  function download(name, text, mime, localOnly) {
+    if (!GAS_MODE) {                                  // GAS 沙箱擋下載；其他環境都先下載一份
+      var blob = (text instanceof Blob) ? text : new Blob([text], { type: mime || 'text/plain' });
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = name; a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
     }
-    var blob = (text instanceof Blob) ? text : new Blob([text], { type: mime || 'text/plain' });
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name; a.click();
-    setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
-    if (CLOUD_URL) {                                  // 靜態雲端模式：下載之外，同一份也存進共用 Drive
-      toast('已下載，同步存到雲端中… ' + name);
-      toB64(text, function (b64) {
-        cloudPost({ action: 'save', name: name, b64: b64, mime: mime || 'application/octet-stream', sub: ($('gtId').value || '').trim() }, function (res) {
-          toast(res.ok ? (res.unverified ? '已送到雲端：' + name : '已存到 Drive：' + name) : ('雲端存檔失敗：' + (res.error || '?')), res.ok);
-        });
+    if (localOnly || !CLOUD_ON) return;
+    toast((GAS_MODE ? '存到雲端中… ' : '已下載，同步存到雲端中… ') + name);
+    cloudSave(name, text, mime).then(function (res) {
+      toast(res.ok ? (res.unverified ? '已送到雲端：' + name : '已存到 Drive：' + name) : ('雲端存檔失敗：' + (res.error || '?')), res.ok);
+    });
+  }
+  // 「記錄這片」時把全部輸出檔一次存進雲端（svg／dxf／png／nc／tap），不下載到本機
+  function saveAllToCloud(onProgress) {
+    var jobs = [];
+    if (st.outline) { jobs.push(['svg', function () { return buildSVG(); }, 'image/svg+xml']);
+                      jobs.push(['dxf', function () { return buildDXF(); }, 'application/dxf']); }
+    if (st.curve) {
+      var nc = buildGroove('nc'), tp = buildGroove('tap');
+      if (nc) jobs.push(['nc', function () { return nc.text; }, 'text/plain']);
+      if (tp) jobs.push(['tap', function () { return tp.text; }, 'text/plain']);
+    }
+    jobs.push(['png', function () { return new Promise(function (r) { $('gtCv').toBlob(r, 'image/png'); }); }, 'image/png']);
+    var done = 0, okN = 0, fails = [];
+    return jobs.reduce(function (chain, j) {
+      return chain.then(function () {
+        return Promise.resolve(j[1]()).then(function (data) { return cloudSave(fname(j[0]), data, j[2]); })
+          .then(function (res) { done++; if (res.ok) okN++; else fails.push(j[0]); if (onProgress) onProgress(done, jobs.length, j[0]); });
       });
-    }
+    }, Promise.resolve()).then(function () { return { total: jobs.length, ok: okN, fails: fails }; });
   }
 
-  function exportSVG() {
+  function exportSVG() { download(fname('svg'), buildSVG(), 'image/svg+xml'); }
+  function buildSVG() {
     var o = toMM(st.outline), layers = passLayers();
     var xs = o.map(function (p) { return p[0]; }), ys = o.map(function (p) { return p[1]; });
     // 對位框：以髓心（原點）為中心的對稱矩形。CAM 軟體（如 Vectric）匯入 SVG 常用
@@ -2768,10 +2796,11 @@ var GT = (function () {
       grooves + '\n' +
       '<g id="PITH" fill="none" stroke="#0066ff" stroke-width="0.25"><path d="M -3 0 L 3 0 M 0 -3 L 0 3"/></g>\n' +
       '</svg>\n';
-    download(fname('svg'), svg, 'image/svg+xml');
+    return svg;
   }
 
-  function exportDXF() {
+  function exportDXF() { download(fname('dxf'), buildDXF(), 'application/dxf'); }
+  function buildDXF() {
     var o = toMM(st.outline);
     function polyline(layer, pts, open) {
       var s = '0\nPOLYLINE\n8\n' + layer + '\n66\n1\n70\n' + (open ? 0 : 1) + '\n';
@@ -2791,7 +2820,7 @@ var GT = (function () {
       grooves + polyline('OUTLINE', o) +
       line('PITH', -3, 0, 3, 0) + line('PITH', 0, -3, 0, 3) +
       '0\nENDSEC\n0\nEOF\n';
-    download(fname('dxf'), dxf, 'application/dxf');
+    return dxf;
   }
 
   // ── 居民手繪雕刻（bonus）──
@@ -3084,7 +3113,7 @@ var GT = (function () {
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
     'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r13-0907', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r14-0907', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3102,7 +3131,7 @@ var GT = (function () {
   }
   function saveConfig() {
     download('凹槽設定_' + (($('gtId').value || '').trim() || '預設') + '.json',
-      JSON.stringify(collectConfig(), null, 2), 'application/json');
+      JSON.stringify(collectConfig(), null, 2), 'application/json', true);
     $('gtCfgInfo').innerHTML = '<span style="color:var(--ok)">已下載設定檔。</span>';
   }
   $('gtCfgFile').addEventListener('change', function () {
@@ -3163,7 +3192,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r13-0907', note: ($('gtRecNote').value || '').trim()
+      ver: 'r14-0907', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
@@ -3197,7 +3226,7 @@ var GT = (function () {
         .concat(PARAM_COLS.map(function (c) { return p[c[1]] != null ? p[c[1]] : ''; })));
     });
     var csv = '﻿' + rows.map(function (r) { return r.join(','); }).join('\n');
-    download('木片尺寸表_' + a.length + '片.csv', new Blob([csv], { type: 'text/csv' }));
+    download('木片尺寸表_' + a.length + '片.csv', new Blob([csv], { type: 'text/csv' }), 'text/csv', true);
   }
   function clearSizes() {
     if ($('btnSizeClr').dataset.armed !== '1') { $('btnSizeClr').dataset.armed = '1'; $('btnSizeClr').textContent = '再按一次＝確定清空';
@@ -3205,46 +3234,61 @@ var GT = (function () {
     saveSizes([]); $('btnSizeClr').dataset.armed = '0'; $('btnSizeClr').textContent = '清空本機紀錄'; refreshSizeInfo();
   }
 
+  // 雲端總表與輸出資料夾的連結（建置時注入；沒有就不顯示連結）
+  var SHEET_URL = (typeof window !== 'undefined' && window.TX_SHEET_URL) || '';
+  var FOLDER_URL = (typeof window !== 'undefined' && window.TX_FOLDER_URL) || '';
+  function cloudLinks() {
+    var a = [];
+    if (SHEET_URL) a.push('<a href="' + SHEET_URL + '" target="_blank" style="color:var(--accent)">打開雲端總表</a>');
+    if (FOLDER_URL) a.push('<a href="' + FOLDER_URL + '" target="_blank" style="color:var(--accent)">打開檔案資料夾</a>');
+    return a.length ? '<br>' + a.join('　·　') : '';
+  }
+  // 「記錄這片」＝一鍵三件事：本機存尺寸 → 寫進雲端總表（一片一列，同編號覆蓋）→ 全部輸出檔存進 Drive／編號／
   function recordToSheet() {
     if (!st.ready || !st.curve) { $('gtRecInfo').innerHTML = '<span class="bad">請先載入照片、產生凹槽曲線再記錄</span>'; return; }
-    // 1) 先存本機尺寸紀錄（離線一定成功）
     var sz = logSize();
     if (!sz.ok) { $('gtRecInfo').innerHTML = '<span class="bad">' + sz.msg + '</span>'; return; }
-    $('gtRecInfo').innerHTML = '<span style="color:var(--ok)">已' + (sz.replaced ? '更新' : '記錄') + '「' + sz.row.id
-      + '」尺寸：長軸 ' + sz.row.major + '／短軸 ' + sz.row.minor + ' mm（' + sz.row.src + '）</span>';
-    // 2) 收集這片的完整參數＋計算結果
+    var lines = ['<span style="color:var(--ok)">已' + (sz.replaced ? '更新' : '記錄') + '「' + sz.row.id
+      + '」尺寸：長軸 ' + sz.row.major + '／短軸 ' + sz.row.minor + ' mm（' + sz.row.src + '）</span>'];
+    function show(extra) { $('gtRecInfo').innerHTML = lines.concat(extra || []).join('<br>'); }
+    show();
     var data = collectParams();
     data.id = sz.row.id; data.diaMin = sz.row.minor; data.minorSrc = sz.row.src; data.estMinor = sz.row.estMinor;
-    var baseMsg = $('gtRecInfo').innerHTML;
-    // 2a) 雲端模式：直接呼叫同專案的 logCut（免網址、免 CORS）
-    if (GAS_MODE) {
-      $('btnRec').disabled = true;
-      google.script.run
-        .withSuccessHandler(function (res) {
-          $('gtRecInfo').innerHTML = baseMsg + '<br><span style="color:var(--ok)">· 已寫入雲端表（第 ' + ((res && res.row) || '?') + ' 列，' + (res && res.updated ? '更新' : '新增') + '）</span>';
-          $('btnRec').disabled = false;
-        })
-        .withFailureHandler(function (e) {
-          $('gtRecInfo').innerHTML = baseMsg + '<br><span class="bad">· 雲端寫入失敗：' + e.message + '（本機尺寸已存）</span>';
-          $('btnRec').disabled = false;
-        })
-        .logCut(data);
-      return;
-    }
-    // 2b) 靜態網址／檔案模式：POST 到 GAS 後端（建置注入的網址，或第 7 卡貼的網址）
+
     var url = CLOUD_URL || ($('gtSheetUrl').value || '').trim();
-    if (!url) return;
-    if (!CLOUD_URL && !/^https:\/\/script\.google\.com\/.*\/exec$/.test(url)) {   // 手動貼的才檢查格式
-      $('gtRecInfo').innerHTML += '<br><span class="bad">（Sheet 網址格式不對，未送出；本機尺寸已存）</span>'; return;
+    if (!GAS_MODE && !url) return;                                  // 純離線：只存本機
+    if (!GAS_MODE && !CLOUD_URL && !/^https:\/\/script\.google\.com\/.*\/exec$/.test(url)) {
+      show(['<span class="bad">（Sheet 網址格式不對，未送出；本機尺寸已存）</span>']); return;
     }
     $('btnRec').disabled = true;
-    cloudPost({ action: 'log', data: data }, function (res) {
-      if (res.ok && !res.unverified) $('gtRecInfo').innerHTML = baseMsg + '<br><span style="color:var(--ok)">· 已寫入雲端表（第 ' + (res.row || '?') + ' 列，' + (res.updated ? '更新' : '新增') + '）</span>';
-      else if (res.ok) $('gtRecInfo').innerHTML = baseMsg + '<br><span style="color:var(--ok)">· 已送到雲端表（請開表確認）</span>';
-      else $('gtRecInfo').innerHTML = baseMsg + '<br><span class="bad">· 雲端寫入失敗：' + (res.error || '?') + '（本機尺寸已存）</span>';
-      $('btnRec').disabled = false;
+    show(['<span style="color:var(--ink2)">· 寫入雲端總表中…</span>']);
+
+    // 1) 總表一列
+    var logP = new Promise(function (resolve) {
+      if (GAS_MODE) {
+        google.script.run.withSuccessHandler(resolve).withFailureHandler(function (e) { resolve({ ok: false, error: e.message }); }).logCut(data);
+      } else cloudPost({ action: 'log', data: data }, resolve);
+    });
+    logP.then(function (res) {
+      res = res || {};
+      if (res.ok && !res.unverified) lines.push('<span style="color:var(--ok)">· 已寫入雲端總表（第 ' + (res.row || '?') + ' 列，' + (res.updated ? '更新' : '新增') + '）</span>');
+      else if (res.ok) lines.push('<span style="color:var(--ok)">· 已送到雲端總表</span>');
+      else lines.push('<span class="bad">· 總表寫入失敗：' + (res.error || '?') + '（本機尺寸已存）</span>');
+      // 2) 全部輸出檔存進 Drive／編號／
+      show(['<span style="color:var(--ink2)">· 存檔到雲端資料夾中… 0/5</span>']);
+      return saveAllToCloud(function (done, total, ext) {
+        show(['<span style="color:var(--ink2)">· 存檔到雲端資料夾中… ' + done + '/' + total + '（' + ext + '）</span>']);
+      });
+    }).then(function (r) {
+      if (r.ok === r.total) lines.push('<span style="color:var(--ok)">· 已存 ' + r.ok + ' 個檔到 Drive／' + sz.row.id + '／（svg、dxf、png、nc、tap）</span>');
+      else lines.push('<span class="bad">· 雲端存檔 ' + r.ok + '/' + r.total + '，失敗：' + r.fails.join(', ') + '（可再按一次記錄）</span>');
+      lines.push(cloudLinks().replace(/^<br>/, ''));
+      show(); $('btnRec').disabled = false;
+    }).catch(function (e) {
+      lines.push('<span class="bad">· 雲端作業中斷：' + (e && e.message || e) + '</span>'); show(); $('btnRec').disabled = false;
     });
   }
+
   refreshSizeInfo();
   if (GAS_MODE || CLOUD_URL) {                      // 雲端版：提示＋隱藏不需要的欄位
     var sub = document.querySelector('.sub');
