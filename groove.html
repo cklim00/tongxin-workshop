@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r17-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r18-0908（記錄這片＝總表＋Drive 檔＋年輪身分證自動更新）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -2793,6 +2793,39 @@ var GT = (function () {
       });
     }, Promise.resolve()).then(function () { return { total: jobs.length, ok: okN, fails: fails }; });
   }
+  // 年輪身分證資料：掃碼頁（idcard.html）畫「時間曼陀羅」要的東西——
+  // 沿木質部邊界由髓心往外取 180 個方向 × 120 段的亮度（0–255，base64），加上外形半徑與心材比例。
+  // 與當初離線烘焙 43 片（_ws_bake.js）同一格式，所以掃碼頁不用改畫法，記錄一片就多一片。
+  function buildIdcard() {
+    var S = RingAnalyzer.state(), wb = st.woodB || st.outline;
+    if (!S || !S.mask || !wb) return null;
+    var NA = 180, NR = 120, px = S.pith.x, py = S.pith.y, w = S.w, h = S.h, A = wb.length;
+    var bytes = new Uint8Array(NA * NR);
+    for (var a = 0; a < NA; a++) {
+      var th = a * 2 * Math.PI / NA, ct = Math.cos(th), sn = Math.sin(th), rmax = wb[Math.round(a / NA * A) % A];
+      for (var j = 0; j < NR; j++) {
+        var r = rmax * (j + 0.5) / NR, x = Math.round(px + ct * r), y = Math.round(py + sn * r), v = 0;
+        if (x >= 0 && y >= 0 && x < w && y < h && S.mask[y * w + x]) v = Math.max(0, Math.min(255, Math.round(S.lum[y * w + x])));
+        bytes[a * NR + j] = v;
+      }
+    }
+    var bin = '';
+    for (var i = 0; i < bytes.length; i += 4096) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 4096));
+    var wood = []; for (var k = 0; k < A; k++) wood.push(Math.round(wb[k]));
+    return { h: +((st.heartRatio || 0).toFixed(4)), w: w, ht: h, wood: wood, polar: btoa(bin), NA: NA, NR: NR };
+  }
+  // 送到後端：Drive／<編號>／<編號>_idcard.json ＋ 索引分頁一列；掃碼頁開頁就會看到這片
+  function saveIdcardToCloud(id, major, minor) {
+    return new Promise(function (resolve) {
+      var data = buildIdcard();
+      if (!data) { resolve({ ok: false, error: '沒有分析結果' }); return; }
+      if (GAS_MODE) {
+        google.script.run.withSuccessHandler(function (r) { resolve(r || { ok: false, error: '?' }); })
+          .withFailureHandler(function (e) { resolve({ ok: false, error: e.message }); })
+          .saveIdcard(id, JSON.stringify(data), major, minor);
+      } else cloudPost({ action: 'idcard', id: id, data: data, major: major, minor: minor }, resolve);
+    });
+  }
 
   function exportSVG() { download(fname('svg'), buildSVG(), 'image/svg+xml'); }
   function buildSVG() {
@@ -3152,7 +3185,7 @@ var GT = (function () {
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
     'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r17-0907', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r18-0908', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3231,7 +3264,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r17-0907', note: ($('gtRecNote').value || '').trim()
+      ver: 'r18-0908', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
@@ -3321,6 +3354,13 @@ var GT = (function () {
     }).then(function (r) {
       if (r.ok === r.total) lines.push('<span style="color:var(--ok)">· 已存 ' + r.ok + ' 個檔到 Drive／' + sz.row.id + '／（svg、dxf、png、nc、tap）</span>');
       else lines.push('<span class="bad">· 雲端存檔 ' + r.ok + '/' + r.total + '，失敗：' + r.fails.join(', ') + '（可再按一次記錄）</span>');
+      // 3) 年輪身分證資料（掃碼頁自動多這一片）
+      show(['<span style="color:var(--ink2)">· 更新年輪身分證資料中…</span>']);
+      return saveIdcardToCloud(sz.row.id, sz.row.major, sz.row.minor);
+    }).then(function (r) {
+      r = r || {};
+      if (r.ok) lines.push('<span style="color:var(--ok)">· 年輪身分證已' + (r.updated ? '更新' : '新增') + '：掃碼頁重新整理就會有 ' + sz.row.id + '</span>');
+      else lines.push('<span class="bad">· 年輪身分證資料未存：' + (r.error || '?') + '（可再按一次記錄）</span>');
       lines.push(cloudLinks().replace(/^<br>/, ''));
       show(); $('btnRec').disabled = false;
     }).catch(function (e) {

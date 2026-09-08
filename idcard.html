@@ -145,6 +145,7 @@
     <div class="hint" id="hint">或直接點下面的木片</div>
     <button class="planEntry" id="toPlanner">拿到好幾片？　規劃我的立柱 ›</button>
     <div id="branches"></div>
+    <div class="hint" id="dbNote" style="margin-top:14px"></div>
   </div>
 </div>
 
@@ -240,10 +241,44 @@
 
 <div class="siteFoot">Copyright © 2026 CKfablab</div>
 
+<script>window.TX_CLOUD_URL="https://script.google.com/macros/s/AKfycbx0YCgILmuunoEoaNQhhVjrGJ6_ddTQ2CXhVqTjrcDh3-7IYOgmWf4PCSlUf6ZWFGez/exec";window.TX_SHEET_URL="https://docs.google.com/spreadsheets/d/1WAeGrh9Ruq9lGl5H5hllC8jRYBilP6rrfrPyC9hxedc";window.TX_FOLDER_URL="https://drive.google.com/drive/folders/1fCLmBNl1hMRzksaaP13ntPLcWqgNcbuP";</script>
 <script src="data.js"></script>
 <script>
 (function(){
   var $=function(id){return document.getElementById(id);};
+  // ── 即時資料：凹槽工具每「記錄這片」就送一片到雲端；這裡開頁先讀索引，點到哪片再讀那片 ──
+  var CLOUD=(typeof window!=='undefined'&&window.TX_CLOUD_URL)||'';
+  var BAKED=Object.keys(WS_DATA).length, CLOUDN=0;
+  function loadCloud(cb){
+    if(!CLOUD){cb();return;}
+    var done=false, t=setTimeout(function(){ if(!done){done=true;cb();} },12000);
+    fetch(CLOUD+'?action=idcards',{method:'GET',mode:'cors'}).then(function(r){return r.json();}).then(function(o){
+      if(o&&o.ok&&o.rows) o.rows.forEach(function(r){
+        if(!r.id||r.h==null||isNaN(r.h)) return;
+        var base=WS_DATA[r.id]||null;
+        WS_DATA[r.id]={h:+r.h,_lazy:true,_base:base};          // 雲端優先（是最新一次記錄），內建當備援
+        if(r.major) SIZES[r.id]=[+r.major, r.minor?+r.minor:+r.major*0.85];
+        CLOUDN++;
+      });
+      if(!done){done=true;clearTimeout(t);cb();}
+    }).catch(function(){ if(!done){done=true;clearTimeout(t);cb();} });
+  }
+  function ensureData(id,cb){
+    var d=WS_DATA[id]; if(!d){cb(false);return;}
+    if(!d._lazy){cb(true);return;}
+    if(d._p){d._p.push(cb);return;}                             // 同一片重複請求：排隊
+    d._p=[cb];
+    function finish(ok){ var q=d._p; delete d._p; q.forEach(function(f){f(ok);}); }
+    fetch(CLOUD+'?action=idcard&id='+encodeURIComponent(id),{method:'GET',mode:'cors'}).then(function(r){return r.json();}).then(function(o){
+      if(o&&o.ok&&o.found&&o.data&&o.data.polar){ var nd=o.data; nd.h=d.h; WS_DATA[id]=nd; finish(true); }
+      else if(d._base){ d._base.h=d.h; WS_DATA[id]=d._base; finish(true); }
+      else finish(false);
+    }).catch(function(){ if(d._base){ d._base.h=d.h; WS_DATA[id]=d._base; finish(true); } else finish(false); });
+  }
+  function rebuildRank(){
+    var ids=Object.keys(WS_DATA).sort(function(a,b){var A=a.split('-').map(Number),B=b.split('-').map(Number);return (A[0]-B[0])||(A[1]-B[1]);});
+    WS_META.ids=ids; WS_META.rank=ids.slice().sort(function(a,b){return WS_DATA[b].h-WS_DATA[a].h;}); N=WS_META.rank.length;
+  }
   var stops=[[236,206,140],[206,150,86],[92,120,120],[52,58,86]];
 
   // ── 解碼 base64 → 極座標 2D ──
@@ -304,8 +339,9 @@
   function render(m){ if(CUR) drawInto(ctx,cv.width,cv.height,CUR,D,m,4.5); }
   // 靜態小曼陀羅（給立柱用）
   function miniMandala(canvas,id){
-    var S=decode(WS_DATA[id]),Dm=densityField(S);
-    drawInto(canvas.getContext('2d'),canvas.width,canvas.height,S,Dm,0.42,2.4);
+    ensureData(id,function(ok){ if(!ok)return;
+      var S=decode(WS_DATA[id]),Dm=densityField(S);
+      drawInto(canvas.getContext('2d'),canvas.width,canvas.height,S,Dm,0.42,2.4); });
   }
   function loop(ts){ if(!t0)t0=ts; var e=(ts-t0)/1000;
     var m=0.5-0.5*Math.cos(e*2*Math.PI/14);   // 14 秒呼吸：空間↔時間
@@ -314,7 +350,7 @@
 
   // ── 生命故事文字 ──
   function pos(id){return WS_META.rank.indexOf(id);}    // 0=最年長
-  var N=WS_META.rank.length;
+  var N=0;
   function ageWords(r){ // r 0..1  (0 年長)
     if(r<0.15)return['年長','這是全批裡數一數二年長的木片。'];
     if(r<0.38)return['偏年長','在這批木片裡，它算是資深的一片。'];
@@ -342,7 +378,15 @@
   function show(id,from){
     id=norm(id);
     if(!WS_DATA[id]){ $('hint').textContent='找不到「'+id+'」，請確認編號（例如 3-1）'; $('hint').style.color='#c88'; return; }
-    $('hint').style.color=''; $('hint').textContent='或直接點下面的木片';
+    $('hint').style.color='';
+    if(WS_DATA[id]._lazy){ $('hint').textContent='讀取 '+id+' 的年輪資料中…'; }
+    ensureData(id,function(ok){
+      if(!ok){ $('hint').textContent='讀不到「'+id+'」的年輪資料，請再試一次'; $('hint').style.color='#c88'; return; }
+      $('hint').textContent='或直接點下面的木片';
+      showNow(id,from);
+    });
+  }
+  function showNow(id,from){
     detailFrom=from||'home';
     CUR=decode(WS_DATA[id]); D=densityField(CUR);
     var r=pos(id), rr=r/(N-1), aw=ageWords(rr), h=WS_DATA[id].h;
@@ -420,6 +464,7 @@
   var SIZES=(typeof WS_SIZES!=='undefined')?WS_SIZES:{};   // {id:[major_mm,minor_mm]}
   var _ws={};
   function woodStats(id){ if(_ws[id])return _ws[id]; var w=WS_DATA[id].wood,mn=1e9,mx=-1e9,s=0;
+    if(!w||!w.length) return {major:100,minor:85,mean:92};
     for(var i=0;i<w.length;i++){mn=Math.min(mn,w[i]);mx=Math.max(mx,w[i]);s+=w[i];}
     return _ws[id]={major:mx,minor:mn,mean:s/w.length}; }
   function sizeOf(id){ if(SIZES[id])return {major:SIZES[id][0],minor:SIZES[id][1],real:true};
@@ -448,22 +493,28 @@
   }
 
   // ── 建入口格 ──
-  var branches={};
-  WS_META.ids.forEach(function(id){var b=id.split('-')[0];(branches[b]=branches[b]||[]).push(id);});
-  var wrap=$('branches'),bks=Object.keys(branches).sort(function(a,b){return a-b;});
   var zh=['','一','二','三','四','五','六','七','八','九'];
-  bks.forEach(function(b){
-    var div=document.createElement('div');div.className='branch';
-    var g=document.createElement('div');g.className='grid';
-    branches[b].sort(function(x,y){return (+x.split('-')[1])-(+y.split('-')[1]);}).forEach(function(id){
-      var h=WS_DATA[id].h, r=pos(id)/(N-1), rgb=col(1-r); // 年長=暖
-      var c=document.createElement('div');c.className='chip';
-      c.innerHTML='<div class="cid">'+id+'</div><div class="cdot" style="background:rgb('+rgb.join(',')+')"></div>';
-      c.onclick=function(){show(id);};
-      g.appendChild(c);
+  function buildGrid(){
+    var branches={};
+    WS_META.ids.forEach(function(id){var b=id.split('-')[0];(branches[b]=branches[b]||[]).push(id);});
+    var wrap=$('branches'),bks=Object.keys(branches).sort(function(a,b){return a-b;});
+    wrap.innerHTML='';
+    bks.forEach(function(b){
+      var div=document.createElement('div');div.className='branch';
+      var g=document.createElement('div');g.className='grid';
+      branches[b].sort(function(x,y){return (+x.split('-')[1])-(+y.split('-')[1]);}).forEach(function(id){
+        var h=WS_DATA[id].h, r=pos(id)/(N-1), rgb=col(1-r); // 年長=暖
+        var c=document.createElement('div');c.className='chip';
+        c.innerHTML='<div class="cid">'+id+'</div><div class="cdot" style="background:rgb('+rgb.join(',')+')"></div>';
+        c.onclick=function(){show(id);};
+        g.appendChild(c);
+      });
+      div.appendChild(g);wrap.appendChild(div);
     });
-    div.appendChild(g);wrap.appendChild(div);
-  });
+    $('dbNote').textContent='目前共 '+N+' 片木片'+(CLOUD?('（工作坊登記 '+CLOUDN+' 片，會隨登記自動增加）'):'');
+  }
+  rebuildRank(); buildGrid();                       // 先用內建資料開頁（不等網路）
+  loadCloud(function(){ rebuildRank(); buildGrid(); });   // 雲端索引回來就重排、補上新登記的片
 
   $('go').onclick=function(){show($('q').value);};
   $('q').addEventListener('keydown',function(e){if(e.key==='Enter')show(this.value);});
