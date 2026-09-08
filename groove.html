@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r16-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r17-0907（＋設定檔＋記錄到 Sheet＋長短軸尺寸紀錄／匯出）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -1407,6 +1407,9 @@ var RingAnalyzer = (function () {
     <div class="gtCard">
       <h2>2｜凹槽參數</h2>
       <button id="btnRings" onclick="GT.detectAllRings()" disabled>偵測全部年輪（再用直徑挑選）</button>
+      <label id="ringShowRow" style="display:none;align-items:center;gap:8px;cursor:pointer;margin-top:6px">
+        <input type="checkbox" id="gtShowRings" checked style="width:auto;margin:0"> 顯示偵測到的年輪線（淡黃）
+      </label>
       <div class="gtHint" id="ringHint" style="display:none">年輪模式：淡黃線＝偵測到的每一條年輪。<b>移動直徑滑桿</b>會自動鎖到最接近的一條；也可以<b>直接點某條年輪</b>選它。跟隨強度／帶寬在此模式不使用；平滑度照常有效。</div>
       <label>目標凹槽直徑 <span class="val" id="vR0">70 mm</span></label>
       <input type="range" id="gtR0" min="50" max="100" value="70" step="1">
@@ -1705,6 +1708,7 @@ var GT = (function () {
     st.grayImg = cN ? (cSum / cN < 8) : false;
     st.ready = true;
     st.allRings = null; st.ringMode = false; st.selRing = -1;   // 換照片／改比例尺就重來
+    $('ringShowRow').style.display = 'none';
     st.maskFilled = null; st.omask = null; st.cmask = null;                      // 補洞遮罩重算
     $('btnRings').disabled = false;
     $('btnRings').textContent = '偵測全部年輪（再用直徑挑選）';
@@ -1916,6 +1920,7 @@ var GT = (function () {
           kept.push(R);
         });
         st.allRings = kept; st.ringMode = true; st.prior = null;
+        $('ringShowRow').style.display = 'flex';
         $('btnRings').textContent = '重新偵測全部年輪';
         $('ringHint').style.display = 'block';
         selectRingByDia(Number($('gtR0').value));
@@ -2459,7 +2464,7 @@ var GT = (function () {
       ctx.setLineDash([]);
     }
     // 年輪模式：畫出全部偵測到的年輪（淡黃細線；選中的那條由下方橘線呈現）
-    if (st.ringMode && st.allRings) {
+    if (st.ringMode && st.allRings && $('gtShowRings').checked) {
       for (var ri = 0; ri < st.allRings.length; ri++) {
         if (ri === st.selRing) continue;
         ctx.strokeStyle = st.allRings[ri].weak ? 'rgba(255,235,110,.25)' : 'rgba(255,235,110,.55)';
@@ -2715,6 +2720,7 @@ var GT = (function () {
       if (st.img) analyze();                                       // 已有照片→用新比例尺重算
     });
   }
+  $('gtShowRings').addEventListener('change', function () { if (st.ready) draw(); });
   $('gtId').addEventListener('change', function () { lookupSizeById(false); });
   $('gtId').addEventListener('input', function () { clearTimeout(_lookupTimer); _lookupTimer = setTimeout(function () { lookupSizeById(false); }, 700); });
   $('gtId').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); lookupSizeById(true); } });
@@ -3146,7 +3152,7 @@ var GT = (function () {
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
     'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r16-0907', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r17-0907', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3225,7 +3231,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r16-0907', note: ($('gtRecNote').value || '').trim()
+      ver: 'r17-0907', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
