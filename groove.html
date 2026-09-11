@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r18-0908（記錄這片＝總表＋Drive 檔＋年輪身分證自動更新）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r19-0911（手繪線條洗槽：刀徑、排序、一刀到底）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -1464,10 +1464,10 @@ var RingAnalyzer = (function () {
     </div>
 
     <div class="gtCard">
-      <h2>5｜居民手繪雕刻（bonus，平時不用）</h2>
+      <h2>5｜手繪線條洗槽（沿線走刀，不是雕刻）</h2>
       <button onclick="document.getElementById('gtEFile').click()">上傳手繪圖照片</button>
       <input type="file" id="gtEFile" accept="image/*" style="display:none">
-      <div id="gtEStatus" class="gtHint">白紙黑筆的畫，拍正、光線均勻。上傳後自動抽出<b>每一筆的中心線</b>（一筆＝一條刀路，不是描邊）。</div>
+      <div id="gtEStatus" class="gtHint">白紙黑筆的畫，拍正、光線均勻。上傳後自動抽出<b>每一筆的中心線</b>，刀就沿著中心線走<b>一趟</b>（一筆＝一條刀路；不描邊、不挖面、不是慢慢雕），槽寬＝刀徑，這是最省時間的做法。</div>
       <label>雕刻圖寬度（mm）<span class="val" id="vEW">60 mm</span></label>
       <input type="range" id="gtEW" min="20" max="150" value="60" step="2">
       <label>位置 X（mm，＋右）<span class="val" id="vEX">0</span></label>
@@ -1476,16 +1476,20 @@ var RingAnalyzer = (function () {
       <input type="range" id="gtEY" min="-80" max="80" value="0" step="1">
       <label>旋轉（°）<span class="val" id="vERot">0°</span></label>
       <input type="range" id="gtERot" min="-180" max="180" value="0" step="5">
-      <label>雕刻深度（mm）</label>
+      <label>洗槽刀徑（mm，槽寬＝刀徑；換刀就改這裡）</label>
+      <input type="number" id="gtEBit" value="3" min="0.5" max="10" step="0.5">
+      <label>洗槽深度（mm）</label>
       <input type="number" id="gtEDepth" value="1.5" min="0.3" max="5" step="0.1">
+      <label>每層下刀（mm；≥深度就一刀到底）</label>
+      <input type="number" id="gtEStep" value="1.5" min="0.3" max="6" step="0.1">
       <label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
         <input type="checkbox" id="gtNoGroove" style="width:auto">
         <span>這片<b>不切年輪凹槽</b>（只做手繪雕刻）</span>
       </label>
       <button id="btnEClear" onclick="GT.clearEngraving()" disabled>移除雕刻圖</button>
-      <button class="pri" id="btnENc" onclick="GT.exportEngraveGcode()" disabled>匯出雕刻 G-code（.nc）</button>
+      <button class="pri" id="btnENc" onclick="GT.exportEngraveGcode()" disabled>匯出洗槽 G-code（.nc · Carvera Air）</button>
       <div id="gtEInfo" class="gtHint"></div>
-      <div class="gtHint">雕刻線條同時會進 SVG／DXF 的 <b>ENGRAVE</b> 圖層。細線建議換 <b>V 型雕刻刀或 1–2mm 平刀</b>——所以雕刻是獨立的 G-code 檔，換刀後再跑；座標原點同樣是髓心，對同一個 X 記號設零即可，位置就會跟預覽一致。</div>
+      <div class="gtHint">線條同時會進 SVG／DXF 的 <b>ENGRAVE</b> 圖層。預覽的線寬＝實際槽寬：兩筆距離小於刀徑會連成一片，太細的畫可換 1–2mm 刀（改上面刀徑即可，刀路不變、只是槽變窄）。這是獨立的 G-code 檔，換刀後再跑；原點同樣是髓心，對同一個 X 記號設零，位置就跟預覽一致。刀路已依「最近的下一筆」排序並自動反向，減少空跑。</div>
     </div>
 
     <div class="gtCard">
@@ -1548,7 +1552,7 @@ var GT = (function () {
   ['gtDepth','gtStepDown','gtFxy','gtFz'].forEach(function (id) {
     $(id).addEventListener('change', function () { if (st.ready && st.curve) report(); updateEngraveEstimate(); });
   });
-  $('gtEDepth').addEventListener('change', function () { updateEngraveEstimate(); });
+  ['gtEDepth', 'gtEStep', 'gtEBit'].forEach(function (id) { $(id).addEventListener('change', function () { updateEngraveEstimate(); if (st.ready) draw(); }); });
 
   // 拉桿要即時但不能每個事件都重算：合併到停手 120ms 後算一次
   var timer = null;
@@ -2519,7 +2523,8 @@ var GT = (function () {
     }
     // 居民手繪雕刻（mm → 畫布：x=髓心+mx/mmpp，y=髓心−my/mmpp）
     if (eng.paths) {
-      ctx.strokeStyle = '#7ee0ff'; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+      var ebit = Number($('gtEBit').value) || 3;
+      ctx.strokeStyle = 'rgba(126,224,255,0.75)'; ctx.lineWidth = Math.max(2, ebit / st.mmpp); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
       eng.paths.forEach(function (p) {
         ctx.beginPath();
         for (var i = 0; i < p.length; i++) {
@@ -2785,13 +2790,15 @@ var GT = (function () {
       if (tp) jobs.push(['tap', function () { return tp.text; }, 'text/plain']);
     }
     jobs.push(['png', function () { return new Promise(function (r) { $('gtCv').toBlob(r, 'image/png'); }); }, 'image/png']);
+    var en = buildEngrave();                                 // 有手繪線條就把洗槽 nc 一起存（檔名含刀徑）
+    if (en) jobs.push([en.name, function () { return en.text; }, 'text/plain']);
     var done = 0, okN = 0, fails = [];
     return jobs.reduce(function (chain, j) {
       return chain.then(function () {
-        return Promise.resolve(j[1]()).then(function (data) { return cloudSave(fname(j[0]), data, j[2]); })
+        return Promise.resolve(j[1]()).then(function (data) { return cloudSave(/\./.test(j[0]) ? j[0] : fname(j[0]), data, j[2]); })
           .then(function (res) { done++; if (res.ok) okN++; else fails.push(j[0]); if (onProgress) onProgress(done, jobs.length, j[0]); });
       });
-    }, Promise.resolve()).then(function () { return { total: jobs.length, ok: okN, fails: fails }; });
+    }, Promise.resolve()).then(function () { return { total: jobs.length, ok: okN, fails: fails, names: jobs.map(function (j) { return /\./.test(j[0]) ? '洗槽nc' : j[0]; }) }; });
   }
   // 年輪身分證資料：掃碼頁（idcard.html）畫「時間曼陀羅」要的東西——
   // 沿木質部邊界由髓心往外取 180 個方向 × 120 段的亮度（0–255，base64），加上外形半徑與心材比例。
@@ -3055,51 +3062,79 @@ var GT = (function () {
     $('gtEInfo').textContent = '';
     draw();
   }
-  // 雕刻時間即時預估（換參數就更新，不用等匯出）
-  function updateEngraveEstimate() {
-    if (!eng.paths || !eng.paths.length) return;
-    var depth = Number($('gtEDepth').value), step = Number($('gtStepDown').value);
-    var F = Number($('gtFxy').value), Fz = Number($('gtFz').value);
-    if (!(depth > 0) || !(step > 0) || !(F > 0) || !(Fz > 0)) return;
-    var nLevels = Math.max(1, Math.ceil(depth / step - 1e-9));
-    var len = 0;
-    eng.paths.forEach(function (p) {
-      for (var i = 1; i < p.length; i++) len += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
-    });
-    var mins = len * nLevels / F + eng.paths.length * nLevels * (step / Fz + 0.05);
-    $('gtEInfo').innerHTML = eng.paths.length + ' 條線，切削 ' + (len * nLevels / 1000).toFixed(2) +
-      ' m，預估雕刻時間：<b>約 ' + Math.ceil(mins) + ' 分鐘</b>（深 ' + depth + 'mm）。';
+  // 刀路排序：從髓心出發，每次挑「起點或終點離目前刀位最近」的一筆（必要時反向走），減少抬刀空跑。
+  function orderEngravePaths(paths) {
+    var left = paths.slice(), out = [], cx = 0, cy = 0, travel = 0;
+    while (left.length) {
+      var best = -1, bestD = 1e18, rev = false;
+      for (var i = 0; i < left.length; i++) {
+        var p = left[i], a = p[0], b = p[p.length - 1];
+        var da = Math.hypot(a[0]-cx, a[1]-cy), db = Math.hypot(b[0]-cx, b[1]-cy);
+        if (da < bestD) { bestD = da; best = i; rev = false; }
+        if (db < bestD) { bestD = db; best = i; rev = true; }
+      }
+      var q = left.splice(best, 1)[0]; if (rev) q = q.slice().reverse();
+      out.push(q); travel += bestD; var e = q[q.length - 1]; cx = e[0]; cy = e[1];
+    }
+    return { paths: out, travel: travel };
   }
-  function exportEngraveGcode() {
-    if (!eng.paths || !eng.paths.length) return;
-    var depth = Number($('gtEDepth').value), step = Number($('gtStepDown').value);
-    var F = Number($('gtFxy').value), Fz = Number($('gtFz').value);
-    var safe = Number($('gtSafe').value), rpm = Number($('gtRpm').value);
-    function f3(v) { return (Math.abs(v) < 5e-4 ? 0 : v).toFixed(3); }
+  function engraveLevels() {
+    var depth = Number($('gtEDepth').value), step = Number($('gtEStep').value);
+    if (!(step > 0)) step = depth;
     var levels = [];
     for (var z = step; z < depth - 1e-9; z += step) levels.push(-z);
     levels.push(-depth);
-    var g = [], cutLen = 0;
-    g.push('; ' + fname('nc').replace('.nc', '_engrave.nc') + '（居民手繪雕刻——請先換雕刻刀再跑）');
-    g.push('; 原點=髓心 X0 Y0, Z0=木片上表面, 單位 mm, 深 ' + depth + 'mm');
-    g.push('G21'); g.push('G90'); g.push('G0 Z' + f3(safe)); g.push('M3 S' + Math.round(rpm));
-    eng.paths.forEach(function (p, pi) {
-      g.push('; ── 線 ' + (pi + 1) + '（' + p.length + ' 點）');
-      levels.forEach(function (zl) {
-        g.push('G0 X' + f3(p[0][0]) + ' Y' + f3(p[0][1]));
-        g.push('G1 Z' + f3(zl) + ' F' + Fz);
-        for (var i = 1; i < p.length; i++) {
-          g.push('G1 X' + f3(p[i][0]) + ' Y' + f3(p[i][1]) + (i === 1 ? ' F' + F : ''));
-          cutLen += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
-        }
-        g.push('G0 Z' + f3(safe));
+    return levels;
+  }
+  function engraveStats() {
+    var F = Number($('gtFxy').value), Fz = Number($('gtFz').value), safe = Number($('gtSafe').value);
+    var depth = Number($('gtEDepth').value);
+    if (!(depth > 0) || !(F > 0) || !(Fz > 0)) return null;
+    var ord = orderEngravePaths(eng.paths), levels = engraveLevels(), len = 0;
+    ord.paths.forEach(function (p) { for (var i = 1; i < p.length; i++) len += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]); });
+    var plunges = ord.paths.length * levels.length;
+    var mins = len * levels.length / F + plunges * ((depth / levels.length) / Fz + (safe + depth) / 2000 + 0.03) + ord.travel * levels.length / 3000;
+    return { ord: ord, levels: levels, len: len, mins: mins, depth: depth, F: F, Fz: Fz, safe: safe };
+  }
+  // 洗槽時間即時預估（換參數就更新，不用等匯出）
+  function updateEngraveEstimate() {
+    if (!eng.paths || !eng.paths.length) return;
+    var S = engraveStats(); if (!S) return;
+    $('gtEInfo').innerHTML = eng.paths.length + ' 筆，切削 ' + (S.len * S.levels.length / 1000).toFixed(2) +
+      ' m（' + S.levels.length + ' 層）＋空跑 ' + (S.ord.travel / 1000).toFixed(2) + ' m，預估：<b>約 ' + Math.ceil(S.mins) + ' 分鐘</b>' +
+      '（刀徑 ' + (Number($('gtEBit').value) || 3) + 'mm、深 ' + S.depth + 'mm、進給 ' + S.F + '）。';
+  }
+  function buildEngrave() {
+    if (!eng.paths || !eng.paths.length) return null;
+    var S = engraveStats(); if (!S) return null;
+    var bit = Number($('gtEBit').value) || 3, rpm = Number($('gtRpm').value);
+    function f3(v) { return (Math.abs(v) < 5e-4 ? 0 : v).toFixed(3); }
+    var id = (($('gtId').value || 'slice').trim() || 'slice');
+    var name = id + '_line_T' + bit + 'mm_D' + S.depth + 'mm.nc';
+    var g = [];
+    g.push('; ' + name + ' - 手繪線條洗槽 (Carvera Air)');
+    g.push('; 沿每一筆中心線走刀一趟, 槽寬=刀徑 ' + bit + 'mm, 深 ' + S.depth + 'mm (' + S.levels.length + ' 層)');
+    g.push('; 原點=髓心 X0 Y0, Z0=木片上表面, 單位 mm; 進給 ' + S.F + ' 下刀 ' + S.Fz + ' 安全高 ' + S.safe);
+    g.push('; ' + S.ord.paths.length + ' 筆, 切削 ' + (S.len * S.levels.length / 1000).toFixed(2) + ' m, 預估 ' + Math.ceil(S.mins) + ' 分');
+    g.push('G21'); g.push('G90'); g.push('G0 Z' + f3(S.safe)); g.push('M3 S' + Math.round(rpm));
+    S.ord.paths.forEach(function (p, pi) {
+      g.push('; -- 筆 ' + (pi + 1) + ' (' + p.length + ' 點)');
+      S.levels.forEach(function (zl, li) {
+        var q = (li % 2) ? p.slice().reverse() : p;               // 多層時來回走，省抬刀
+        if (li === 0) g.push('G0 X' + f3(q[0][0]) + ' Y' + f3(q[0][1]));
+        g.push('G1 Z' + f3(zl) + ' F' + S.Fz);
+        for (var i = 1; i < q.length; i++) g.push('G1 X' + f3(q[i][0]) + ' Y' + f3(q[i][1]) + (i === 1 ? ' F' + S.F : ''));
       });
+      g.push('G0 Z' + f3(S.safe));
     });
-    g.push('M5'); g.push('G0 Z' + f3(safe)); g.push('M2');
-    var name = (($('gtId').value || 'slice').trim() || 'slice') + '_engrave_D' + depth + 'mm.nc';
-    download(name, g.join('\n') + '\n', 'text/plain');
-    $('gtEInfo').innerHTML = '已產生：' + eng.paths.length + ' 條線，切削總長 ' + (cutLen/1000).toFixed(2) + ' m，預估約 <b>' +
-      Math.ceil(cutLen / F + eng.paths.length * levels.length * (step / Fz + 0.05)) + ' 分鐘</b>。';
+    g.push('M5'); g.push('G0 Z' + f3(S.safe)); g.push('M2');
+    return { name: name, text: g.join('\n') + '\n', stats: S, bit: bit };
+  }
+  function exportEngraveGcode() {
+    var r = buildEngrave(); if (!r) return;
+    download(r.name, r.text, 'text/plain');
+    $('gtEInfo').innerHTML = '已產生 <b>' + r.name + '</b>：' + r.stats.ord.paths.length + ' 筆，切削 ' + (r.stats.len * r.stats.levels.length / 1000).toFixed(2) +
+      ' m，預估約 <b>' + Math.ceil(r.stats.mins) + ' 分鐘</b>（刀徑 ' + r.bit + 'mm、深 ' + r.stats.depth + 'mm）。';
   }
 
   // ── G-code：直接給 Carvera Air 執行（Smoothieware/GRBL 通用指令集）──
@@ -3183,9 +3218,9 @@ var GT = (function () {
   // 預設值版號：改了 HTML 預設（深度 6／平滑 100%／回中＝上）就 +1，舊的自動記住設定會把這幾項換成新預設
   var DEFV = 3, DEF_MIGRATE = ['gtDepth', 'gtSmooth', 'gtFeed'];
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
-    'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth'];
+    'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth', 'gtEStep', 'gtEBit'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r18-0908', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r19-0911', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3264,7 +3299,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r18-0908', note: ($('gtRecNote').value || '').trim()
+      ver: 'r19-0911', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
@@ -3352,7 +3387,7 @@ var GT = (function () {
         show(['<span style="color:var(--ink2)">· 存檔到雲端資料夾中… ' + done + '/' + total + '（' + ext + '）</span>']);
       });
     }).then(function (r) {
-      if (r.ok === r.total) lines.push('<span style="color:var(--ok)">· 已存 ' + r.ok + ' 個檔到 Drive／' + sz.row.id + '／（svg、dxf、png、nc、tap）</span>');
+      if (r.ok === r.total) lines.push('<span style="color:var(--ok)">· 已存 ' + r.ok + ' 個檔到 Drive／' + sz.row.id + '／（' + r.names.join('、') + '）</span>');
       else lines.push('<span class="bad">· 雲端存檔 ' + r.ok + '/' + r.total + '，失敗：' + r.fails.join(', ') + '（可再按一次記錄）</span>');
       // 3) 年輪身分證資料（掃碼頁自動多這一片）
       show(['<span style="color:var(--ink2)">· 更新年輪身分證資料中…</span>']);
