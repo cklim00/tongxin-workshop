@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r19-0911（手繪線條洗槽：刀徑、排序、一刀到底）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r20-0912（檔頭加 T? M6：機器提示換刀＋量刀長）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -1423,6 +1423,8 @@ var RingAnalyzer = (function () {
       <input type="number" id="gtW" value="6" min="1" max="30" step="0.5">
       <label>銑刀直徑（mm）</label>
       <input type="number" id="gtBit" value="4" min="1" max="20" step="0.5">
+      <label>刀號（只寫進 Carvera .nc 檔頭 T?  M6；.tap 不加）</label>
+      <input type="number" id="gtToolNo" value="1" min="1" max="99" step="1">
       <label>回中凹槽（燈條走線從圈回到髓心）</label>
       <select id="gtFeed">
         <option value="">無</option>
@@ -1460,7 +1462,7 @@ var RingAnalyzer = (function () {
       <button class="pri" id="btnNc" onclick="GT.exportGcode()" disabled>匯出 G-code（.nc · Carvera Air）</button>
       <button id="btnTap" onclick="GT.exportTap()" disabled>匯出 Tap（.tap · 三軸 6090／Mach3）</button>
       <div id="gtGInfo" class="gtHint"></div>
-      <div class="gtHint">只含<b>凹槽（GROOVE）＋回中槽（FEED）</b>的切割路徑，沒有外輪廓。原點＝髓心 X0Y0，Z0＝木片上表面。機器上：刀尖對到木片上的 X 記號、輕觸表面，設 XYZ 工作零點後執行。<br><b>.nc</b>＝Carvera Air（Smoothieware）；<b>.tap</b>＝台灣三軸 6090（Mach3，括號註解＋% 包夾＋M30）。兩檔刀路完全相同，只差機器方言。</div>
+      <div class="gtHint">只含<b>凹槽（GROOVE）＋回中槽（FEED）</b>的切割路徑，沒有外輪廓。原點＝髓心 X0Y0，Z0＝木片上表面。機器上：刀尖對到木片上的 X 記號、輕觸表面，設 XYZ 工作零點後執行。<br><b>.nc</b>＝Carvera Air（Smoothieware）；<b>.tap</b>＝台灣三軸 6090（Mach3，括號註解＋% 包夾＋M30）。兩檔刀路完全相同，只差機器方言。<br><b>.nc 檔頭有 T?&nbsp;M6</b>（.tap 沒有）：Carvera 會先走換刀流程（提示裝該號刀、量刀長 TLO）才開主軸，所以每次跑之前不必再手動改頂列的刀號；探針量完 Z 直接換刀跑也沒問題。</div>
     </div>
 
     <div class="gtCard">
@@ -1478,6 +1480,8 @@ var RingAnalyzer = (function () {
       <input type="range" id="gtERot" min="-180" max="180" value="0" step="5">
       <label>洗槽刀徑（mm，槽寬＝刀徑；換刀就改這裡）</label>
       <input type="number" id="gtEBit" value="3" min="0.5" max="10" step="0.5">
+      <label>洗槽刀號（檔頭 T?  M6；跟年輪凹槽用不同號，機器才會提示換刀）</label>
+      <input type="number" id="gtEToolNo" value="2" min="1" max="99" step="1">
       <label>洗槽深度（mm）</label>
       <input type="number" id="gtEDepth" value="1.5" min="0.3" max="5" step="0.1">
       <label>每層下刀（mm；≥深度就一刀到底）</label>
@@ -3116,7 +3120,9 @@ var GT = (function () {
     g.push('; 沿每一筆中心線走刀一趟, 槽寬=刀徑 ' + bit + 'mm, 深 ' + S.depth + 'mm (' + S.levels.length + ' 層)');
     g.push('; 原點=髓心 X0 Y0, Z0=木片上表面, 單位 mm; 進給 ' + S.F + ' 下刀 ' + S.Fz + ' 安全高 ' + S.safe);
     g.push('; ' + S.ord.paths.length + ' 筆, 切削 ' + (S.len * S.levels.length / 1000).toFixed(2) + ' m, 預估 ' + Math.ceil(S.mins) + ' 分');
-    g.push('G21'); g.push('G90'); g.push('G0 Z' + f3(S.safe)); g.push('M3 S' + Math.round(rpm));
+    g.push('G21'); g.push('G90');
+    g.push('T' + toolNo('gtEToolNo') + ' M6 ; 換刀：裝 ' + bit + 'mm 洗槽刀');
+    g.push('G0 Z' + f3(S.safe)); g.push('M3 S' + Math.round(rpm));
     S.ord.paths.forEach(function (p, pi) {
       g.push('; -- 筆 ' + (pi + 1) + ' (' + p.length + ' 點)');
       S.levels.forEach(function (zl, li) {
@@ -3137,6 +3143,7 @@ var GT = (function () {
       ' m，預估約 <b>' + Math.ceil(r.stats.mins) + ' 分鐘</b>（刀徑 ' + r.bit + 'mm、深 ' + r.stats.depth + 'mm）。';
   }
 
+  function toolNo(id) { var n = Math.round(Number($(id).value)); return (n >= 1 && n <= 99) ? n : 1; }
   // ── G-code：直接給 Carvera Air 執行（Smoothieware/GRBL 通用指令集）──
   // 只輸出真正要切的線：GROOVE（封閉圈，每層繞一圈接著往下）＋ FEED（開放線，來回換向下刀）。
   // 原點＝髓心，Z0＝木片上表面，負 Z 往下切。
@@ -3161,6 +3168,7 @@ var GT = (function () {
     g.push(cm('刀徑 ' + $('gtBit').value + 'mm, 槽寬 ' + $('gtW').value + 'mm, 深 ' + depth + 'mm, 每層 ' + step + 'mm, ' + levels.length + ' 層'));
     g.push('G21'); g.push('G90');
     if (tap) g.push('G17 G40 G49 G80');                   // Mach3 安全起始：XY 平面、取消刀補/刀長補償/固定循環
+    if (!tap) g.push('T' + toolNo('gtToolNo') + ' M6 ; 換刀：裝 ' + $('gtBit').value + 'mm 銑刀');   // 只有 Carvera .nc 加換刀；.tap（三軸 6090／Mach3）維持原樣
     g.push('G0 Z' + f3(safe));
     g.push('M3 S' + Math.round(rpm));
     function segLen(a, b) { return Math.hypot(b[0] - a[0], b[1] - a[1]); }
@@ -3218,9 +3226,9 @@ var GT = (function () {
   // 預設值版號：改了 HTML 預設（深度 6／平滑 100%／回中＝上）就 +1，舊的自動記住設定會把這幾項換成新預設
   var DEFV = 3, DEF_MIGRATE = ['gtDepth', 'gtSmooth', 'gtFeed'];
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
-    'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth', 'gtEStep', 'gtEBit'];
+    'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth', 'gtEStep', 'gtEBit', 'gtToolNo', 'gtEToolNo'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r19-0911', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r20-0912', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3299,7 +3307,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r19-0911', note: ($('gtRecNote').value || '').trim()
+      ver: 'r20-0912', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
