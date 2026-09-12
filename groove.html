@@ -1381,7 +1381,7 @@ var RingAnalyzer = (function () {
 
 <header>
   <h1>年輪凹槽曲線工具</h1>
-  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r20-0912（檔頭加 T? M6：機器提示換刀＋量刀長）</b></div>
+  <div class="sub">Ring-following groove for CNC · 同心石光　<b style="color:var(--wood)">版本 r21-0912（預設刀徑 3／深 2；只做手繪的片也能記錄）</b></div>
 </header>
 
 <div id="gtWrap">
@@ -1422,7 +1422,7 @@ var RingAnalyzer = (function () {
       <label>凹槽寬度（mm）</label>
       <input type="number" id="gtW" value="6" min="1" max="30" step="0.5">
       <label>銑刀直徑（mm）</label>
-      <input type="number" id="gtBit" value="4" min="1" max="20" step="0.5">
+      <input type="number" id="gtBit" value="3" min="1" max="20" step="0.5">
       <label>刀號（只寫進 Carvera .nc 檔頭 T?  M6；.tap 不加）</label>
       <input type="number" id="gtToolNo" value="1" min="1" max="99" step="1">
       <label>回中凹槽（燈條走線從圈回到髓心）</label>
@@ -1448,7 +1448,7 @@ var RingAnalyzer = (function () {
     <div class="gtCard">
       <h2>4｜G-code（Carvera Air 直接切）</h2>
       <label>凹槽深度（mm）</label>
-      <input type="number" id="gtDepth" value="6" min="0.5" max="20" step="0.5">
+      <input type="number" id="gtDepth" value="2" min="0.5" max="20" step="0.5">
       <label>每層下刀（mm）</label>
       <input type="number" id="gtStepDown" value="2" min="0.5" max="6" step="0.5">
       <label>進給速度（mm/min）</label>
@@ -3224,11 +3224,11 @@ var GT = (function () {
 
   // ── 設定檔：存／讀所有參數（不含木片編號與照片）──
   // 預設值版號：改了 HTML 預設（深度 6／平滑 100%／回中＝上）就 +1，舊的自動記住設定會把這幾項換成新預設
-  var DEFV = 3, DEF_MIGRATE = ['gtDepth', 'gtSmooth', 'gtFeed'];
+  var DEFV = 4, DEF_MIGRATE = ['gtDepth', 'gtSmooth', 'gtFeed', 'gtBit'];   // v4（2026-09-12）：刀徑 3、深度 2
   var CFG_KEYS = ['gtDia', 'gtDiaMin', 'gtR0', 'gtBand', 'gtFollow', 'gtSmooth', 'gtW', 'gtBit',
     'gtFeed', 'gtDepth', 'gtStepDown', 'gtFxy', 'gtFz', 'gtSafe', 'gtRpm', 'gtEDepth', 'gtEStep', 'gtEBit', 'gtToolNo', 'gtEToolNo'];
   function collectConfig() {
-    var o = { _tool: '年輪凹槽工具', _ver: 'r20-0912', _defv: DEFV };
+    var o = { _tool: '年輪凹槽工具', _ver: 'r21-0912', _defv: DEFV };
     CFG_KEYS.forEach(function (k) { var el = $(k); if (el) o[k] = el.value; });
     return o;
   }
@@ -3307,7 +3307,7 @@ var GT = (function () {
       minRadius: (st.curve ? minRadius(st.curve).toFixed(1) : ''),
       estMin: (est ? Math.ceil(est.mins) : ''),
       estMinor: (st.estMinor != null ? st.estMinor : ''),
-      ver: 'r20-0912', note: ($('gtRecNote').value || '').trim()
+      ver: 'r21-0912', note: ($('gtRecNote').value || '').trim()
     };
   }
   function logSize() {
@@ -3360,7 +3360,9 @@ var GT = (function () {
   }
   // 「記錄這片」＝一鍵三件事：本機存尺寸 → 寫進雲端總表（一片一列，同編號覆蓋）→ 全部輸出檔存進 Drive／編號／
   function recordToSheet() {
-    if (!st.ready || !st.curve) { $('gtRecInfo').innerHTML = '<span class="bad">請先載入照片、產生凹槽曲線再記錄</span>'; return; }
+    if (!st.ready) { $('gtRecInfo').innerHTML = '<span class="bad">請先載入木片照片再記錄</span>'; return; }
+    var hasEng = !!(eng.paths && eng.paths.length);
+    if (!st.curve && !hasEng) { $('gtRecInfo').innerHTML = '<span class="bad">這片沒有凹槽曲線也沒有手繪線條——請先產生凹槽，或上傳手繪圖再記錄</span>'; return; }
     var sz = logSize();
     if (!sz.ok) { $('gtRecInfo').innerHTML = '<span class="bad">' + sz.msg + '</span>'; return; }
     var lines = ['<span style="color:var(--ok)">已' + (sz.replaced ? '更新' : '記錄') + '「' + sz.row.id
@@ -3369,6 +3371,7 @@ var GT = (function () {
     show();
     var data = collectParams();
     data.id = sz.row.id; data.diaMin = sz.row.minor; data.minorSrc = sz.row.src; data.estMinor = sz.row.estMinor;
+    if (!st.curve && hasEng) data.note = ('只做手繪洗槽（' + eng.paths.length + ' 筆，刀徑 ' + (Number($('gtEBit').value) || 3) + 'mm）' + (data.note ? '；' + data.note : ''));
 
     var url = CLOUD_URL || ($('gtSheetUrl').value || '').trim();
     if (!GAS_MODE && !url) return;                                  // 純離線：只存本機
@@ -3390,7 +3393,7 @@ var GT = (function () {
       else if (res.ok) lines.push('<span style="color:var(--ok)">· 已送到雲端總表</span>');
       else lines.push('<span class="bad">· 總表寫入失敗：' + (res.error || '?') + '（本機尺寸已存）</span>');
       // 2) 全部輸出檔存進 Drive／編號／
-      show(['<span style="color:var(--ink2)">· 存檔到雲端資料夾中… 0/5</span>']);
+      show(['<span style="color:var(--ink2)">· 存檔到雲端資料夾中…</span>']);
       return saveAllToCloud(function (done, total, ext) {
         show(['<span style="color:var(--ink2)">· 存檔到雲端資料夾中… ' + done + '/' + total + '（' + ext + '）</span>']);
       });
