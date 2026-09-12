@@ -38,6 +38,10 @@
   .chip:active{transform:scale(.96)}
   .chip .cid{font-size:19px;font-weight:800;letter-spacing:.06em}
   .chip .cdot{width:100%;height:4px;border-radius:3px;margin-top:9px}
+  .chip.pend{border-style:dashed;opacity:.62;cursor:default}
+  .chip.pend .cid{color:var(--ink3)}
+  .chip.pend .cdot{background:repeating-linear-gradient(90deg,var(--line) 0 4px,transparent 4px 8px)}
+  .chip.pend .cp{font-size:9px;color:var(--ink3);margin-top:4px;letter-spacing:0}
   @media(max-width:520px){.grid{gap:7px}.chip{padding:14px 4px;border-radius:12px}.chip .cid{font-size:17px}}
 
   /* ── 詳細頁 ── */
@@ -107,7 +111,7 @@
   .planEntry{display:block;margin:2px auto 26px;background:var(--bg2);border:1px solid var(--gold);
     color:var(--gold2);border-radius:26px;padding:12px 24px;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}
   .planEntry:active{transform:scale(.97)}
-  #planner,#column{display:none;padding-bottom:80px}
+  #planner,#column,#feedback{display:none;padding-bottom:80px}
   .phint{text-align:center;color:var(--ink3);font-size:13px;margin:4px 0 18px}
   .mychips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;min-height:44px;margin:0 0 22px}
   .mychip{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:9px 8px 9px 16px;
@@ -313,6 +317,7 @@
   // 雲端索引：先用手機上次存的快取立刻畫（秒開），再去雲端拿最新的；GAS 冷啟動常要 5–15 秒，
   // 所以不設「逾時就放棄」——資料不管多晚回來都套用、重畫（buildGrid 可重複呼叫）。
   var CLOUD_STATE='';
+  var PEND={};   // 總表「木片尺寸」有量、但還沒有年輪身分證資料的片（灰色虛線格，等團隊用凹槽工具記錄）
   function applyRows(rows){
     var seen={}; CLOUDN=0;
     rows.forEach(function(r){
@@ -335,9 +340,17 @@
       if(o&&o.ok&&o.rows){ applyRows(o.rows); try{ localStorage.setItem('tx_idc_rows',JSON.stringify({t:Date.now(),rows:o.rows})); }catch(e){} CLOUD_STATE='已更新'; cb(); }
       else { CLOUD_STATE='雲端回傳異常'; setNote(); }
     }).catch(function(){ clearTimeout(slow); CLOUD_STATE=(CLOUD_STATE==='快取')?'快取（雲端連不上）':'雲端連不上'; setNote(); });
+    // 另外讀「木片尺寸」分頁：有量尺寸但還沒年輪資料的片，先以灰格出現，讓大家找得到自己的編號
+    function applySizes(rows){ PEND={}; rows.forEach(function(r){ if(!r.id) return; if(r.major) SIZES[r.id]=[+r.major, r.minor?+r.minor:+r.major*0.85]; if(!WS_DATA[r.id]) PEND[r.id]=r; }); }
+    try{ var cs=JSON.parse(localStorage.getItem('tx_idc_sizes')||'null'); if(cs&&cs.rows&&cs.rows.length){ applySizes(cs.rows); cb(); } }catch(e){}
+    fetch(CLOUD+'?action=sizes',{method:'GET',mode:'cors'}).then(function(r){return r.json();}).then(function(o){
+      if(o&&o.ok&&o.rows){ applySizes(o.rows); try{ localStorage.setItem('tx_idc_sizes',JSON.stringify({t:Date.now(),rows:o.rows})); }catch(e){} cb(); }
+    }).catch(function(){});
   }
   function setNote(){ var el=$('dbNote'); if(!el) return;
-    el.textContent='目前共 '+N+' 片木片'+(CLOUD?('（工作坊登記 '+CLOUDN+' 片'+(CLOUD_STATE?'．'+CLOUD_STATE:'')+'）'):''); }
+    var pend=Object.keys(PEND).filter(function(id){return !WS_DATA[id];}).length;
+    el.textContent='目前共 '+N+' 片木片'+(CLOUD?('（工作坊登記 '+CLOUDN+' 片'+(pend?'．另 '+pend+' 片已量尺寸、年輪資料待記錄':'')+(CLOUD_STATE?'．'+CLOUD_STATE:'')+'）'):''); }
+  function pendMsg(id){ var r=PEND[id]; var sz=''; if(r&&r.major){ sz='已量尺寸 '+r.major+(r.minor?('×'+r.minor):'')+' mm，'; } return '「'+id+'」'+sz+'還沒有年輪資料——請團隊用凹槽工具「記錄這片」，記錄完重新整理就會出現'; }
   function ensureData(id,cb){
     var d=WS_DATA[id]; if(!d){cb(false);return;}
     if(!d._lazy){cb(true);return;}
@@ -456,7 +469,7 @@
   var detailFrom='home';
   function show(id,from){
     id=norm(id);
-    if(!WS_DATA[id]){ $('hint').textContent='找不到「'+id+'」，請確認編號（例如 3-1）'; $('hint').style.color='#c88'; return; }
+    if(!WS_DATA[id]){ $('hint').textContent=PEND[id]?pendMsg(id):'找不到「'+id+'」，請確認編號（例如 3-1）'; $('hint').style.color='#c88'; return; }
     $('hint').style.color='';
     if(WS_DATA[id]._lazy){ $('hint').textContent='讀取 '+id+' 的年輪資料中…'; }
     ensureData(id,function(ok){
@@ -509,7 +522,7 @@
     $('toColumn').disabled = myList.length<2;
     $('toColumn').textContent = myList.length<2 ? '至少加入 2 片' : '看我的立柱（依年紀排好，共 '+myList.length+' 片）';
   }
-  function addMy(id){ id=norm(id); if(!WS_DATA[id]){ $('pHint').textContent='找不到「'+id+'」，請確認編號'; $('pHint').style.color='#c88'; return; }
+  function addMy(id){ id=norm(id); if(!WS_DATA[id]){ $('pHint').textContent=PEND[id]?pendMsg(id):'找不到「'+id+'」，請確認編號'; $('pHint').style.color='#c88'; return; }
     $('pHint').style.color=''; $('pHint').textContent='通常一位參與者拿 5–6 片';
     if(myList.indexOf(id)<0){ if(myList.length>=10){$('pHint').textContent='最多 10 片';return;} myList.push(id);} renderChips(); }
   var flip=false, colMode='mandala';
@@ -633,14 +646,18 @@
   function buildGrid(){
     var branches={};
     WS_META.ids.forEach(function(id){var b=id.split('-')[0];(branches[b]=branches[b]||[]).push(id);});
+    Object.keys(PEND).forEach(function(id){ if(WS_DATA[id]) return; var b=id.split('-')[0]; if(!/^\d+-\d+$/.test(id)) return; (branches[b]=branches[b]||[]).push(id); });
     var wrap=$('branches'),bks=Object.keys(branches).sort(function(a,b){return a-b;});
     wrap.innerHTML='';
     bks.forEach(function(b){
       var div=document.createElement('div');div.className='branch';
       var g=document.createElement('div');g.className='grid';
       branches[b].sort(function(x,y){return (+x.split('-')[1])-(+y.split('-')[1]);}).forEach(function(id){
+        var c=document.createElement('div');
+        if(!WS_DATA[id]){ c.className='chip pend'; c.innerHTML='<div class="cid">'+id+'</div><div class="cdot"></div><div class="cp">年輪待記錄</div>';
+          c.onclick=function(){ $('hint').textContent=pendMsg(id); $('hint').style.color='#c88'; window.scrollTo({top:0,behavior:'smooth'}); }; g.appendChild(c); return; }
         var h=WS_DATA[id].h, r=pos(id)/(N-1), rgb=ageCol(r); // 年長=暖金、年輕=冷青（同光譜）
-        var c=document.createElement('div');c.className='chip';
+        c.className='chip';
         c.innerHTML='<div class="cid">'+id+'</div><div class="cdot" style="background:rgb('+rgb.join(',')+')"></div>';
         c.onclick=function(){show(id);};
         g.appendChild(c);
