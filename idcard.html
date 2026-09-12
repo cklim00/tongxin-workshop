@@ -394,7 +394,7 @@
     $('dSub').textContent='同一棵老樟樹的一片';
     // 年齡
     $('ageLead').textContent=aw[0];
-    $('agePin').style.left=(rr*100)+'%';
+    $('agePin').style.left=((1-rr)*100)+'%';   // 光譜右端＝年長（rr=0 是最年長，要放最右）
     $('ageBody').innerHTML=aw[1]+'　在全部 <b>'+N+'</b> 片木片中，依心材沉澱的程度，它排在第 <b>'+(r+1)+'</b> 位（越靠前越年長）。';
     // 心材
     var pct=Math.round(h*100);
