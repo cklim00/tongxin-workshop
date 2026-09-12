@@ -521,6 +521,7 @@
   $('rOrder').addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
     var i=+b.dataset.i, j=i+(+b.dataset.d); if(j<0||j>=regOrder.length)return;
     var t=regOrder[i]; regOrder[i]=regOrder[j]; regOrder[j]=t; renderOrder(); });
+  function sid(){ return Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8); }
   function postCloud(payload,cb){
     if(!CLOUD){cb({ok:false,error:'沒有雲端網址'});return;}
     var body=JSON.stringify(payload);
@@ -534,7 +535,7 @@
     if(!regOrder.length){ m.className='fmsg bad'; m.textContent='還沒有木片。'; return; }
     m.className='fmsg'; m.textContent='送出中…'; $('rSend').disabled=true;
     postCloud({action:'register',data:{name:name,ids:regOrder.join(' '),count:regOrder.length,story:story,
-      heart:regOrder.map(function(id){return WS_DATA[id]?Math.round(WS_DATA[id].h*100)+'%':'';}).join(' '),source:'idcard'}},function(r){
+      heart:regOrder.map(function(id){return WS_DATA[id]?Math.round(WS_DATA[id].h*100)+'%':'';}).join(' '),source:'idcard',sid:sid()}},function(r){
       $('rSend').disabled=false;
       if(r&&r.ok){ m.className='fmsg ok'; m.textContent='登記好了，謝謝 '+name+'。這串木片會記在你的名字下。'; }
       else { m.className='fmsg bad'; m.textContent='送出失敗：'+(r&&r.error||'網路問題')+'，請再按一次或找工作人員。'; }
@@ -551,7 +552,7 @@
     var m=$('fMsg'), fun=picked('fFun')[0]||'';
     if(!fun){ m.className='fmsg bad'; m.textContent='至少點一下「好玩嗎」的分數。'; return; }
     var data={name:$('fName').value.trim(),who:picked('fWho')[0]||'',fun:fun,like:picked('fLike').join('、'),hard:picked('fHard')[0]||'',
-      understand:picked('fGet')[0]||'',next:picked('fNext')[0]||'',say:$('fSay').value.trim(),session:'第一場 2026-09-12'};
+      understand:picked('fGet')[0]||'',next:picked('fNext')[0]||'',say:$('fSay').value.trim(),session:'第一場 2026-09-12',sid:sid()};
     m.className='fmsg'; m.textContent='送出中…'; $('fSend').disabled=true;
     postCloud({action:'feedback',data:data},function(r){
       $('fSend').disabled=false;
