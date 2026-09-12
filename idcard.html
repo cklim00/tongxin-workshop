@@ -366,6 +366,10 @@
     return {f:sm,lo:vals[(vals.length*0.1)|0],hi:vals[(vals.length*0.9)|0],
             mid:vals[(vals.length*0.5)|0],NA:NA,NR:NR};
   }
+  // 年齡色：跟「它有多年長？」光譜同一條（右端暖金＝年長，左端冷青＝年輕）。rr=0 最年長 → 暖金；rr=1 最年輕 → 冷青
+  var AGE_STOPS=[[217,178,94],[138,138,106],[92,120,120]];
+  function ageCol(rr){rr=Math.max(0,Math.min(1,rr));var seg=rr*2,i=Math.min(1,seg|0),f=seg-i,a=AGE_STOPS[i],b=AGE_STOPS[i+1];
+    return [Math.round(a[0]+(b[0]-a[0])*f),Math.round(a[1]+(b[1]-a[1])*f),Math.round(a[2]+(b[2]-a[2])*f)];}
   function col(t){t=Math.max(0,Math.min(1,t));var seg=t*3,i=Math.min(2,seg|0),f=seg-i,a=stops[i],b=stops[i+1];
     return [Math.round(a[0]+(b[0]-a[0])*f),Math.round(a[1]+(b[1]-a[1])*f),Math.round(a[2]+(b[2]-a[2])*f)];}
 
@@ -484,7 +488,7 @@
   var myList=[];
   function renderChips(){
     $('myChips').innerHTML=myList.map(function(id){
-      var r=pos(id)/(N-1),rgb=col(1-r);
+      var r=pos(id)/(N-1),rgb=ageCol(r);
       return '<span class="mychip"><span class="ca" style="background:rgb('+rgb.join(',')+')"></span>'+id
         +'<button class="cx" data-id="'+id+'">×</button></span>';
     }).join('');
@@ -621,7 +625,7 @@
       var div=document.createElement('div');div.className='branch';
       var g=document.createElement('div');g.className='grid';
       branches[b].sort(function(x,y){return (+x.split('-')[1])-(+y.split('-')[1]);}).forEach(function(id){
-        var h=WS_DATA[id].h, r=pos(id)/(N-1), rgb=col(1-r); // 年長=暖
+        var h=WS_DATA[id].h, r=pos(id)/(N-1), rgb=ageCol(r); // 年長=暖金、年輕=冷青（同光譜）
         var c=document.createElement('div');c.className='chip';
         c.innerHTML='<div class="cid">'+id+'</div><div class="cdot" style="background:rgb('+rgb.join(',')+')"></div>';
         c.onclick=function(){show(id);};
