@@ -310,20 +310,34 @@
   // ── 即時資料：凹槽工具每「記錄這片」就送一片到雲端；這裡開頁先讀索引，點到哪片再讀那片 ──
   var CLOUD=(typeof window!=='undefined'&&window.TX_CLOUD_URL)||'';
   var BAKED=Object.keys(WS_DATA).length, CLOUDN=0;
+  // 雲端索引：先用手機上次存的快取立刻畫（秒開），再去雲端拿最新的；GAS 冷啟動常要 5–15 秒，
+  // 所以不設「逾時就放棄」——資料不管多晚回來都套用、重畫（buildGrid 可重複呼叫）。
+  var CLOUD_STATE='';
+  function applyRows(rows){
+    var seen={}; CLOUDN=0;
+    rows.forEach(function(r){
+      if(!r.id||r.h==null||isNaN(r.h)) return;
+      var cur=WS_DATA[r.id], base=(cur&&cur._base!==undefined)?cur._base:(cur||null);
+      if(cur&&cur._lazy===undefined&&!cur._base&&cur.polar&&cur._cloud) base=cur;   // 已從雲端載過完整資料就留著
+      if(cur&&cur._cloud&&cur.polar&&+cur.h===+r.h){ CLOUDN++; return; }           // 同一筆、已載入 → 不動
+      WS_DATA[r.id]={h:+r.h,_lazy:true,_base:base};          // 雲端優先（是最新一次記錄），內建當備援
+      if(r.major) SIZES[r.id]=[+r.major, r.minor?+r.minor:+r.major*0.85];
+      CLOUDN++;
+    });
+  }
   function loadCloud(cb){
     if(!CLOUD){cb();return;}
-    var done=false, t=setTimeout(function(){ if(!done){done=true;cb();} },12000);
+    try{ var c=JSON.parse(localStorage.getItem('tx_idc_rows')||'null'); if(c&&c.rows&&c.rows.length){ applyRows(c.rows); CLOUD_STATE='快取'; cb(); } }catch(e){}
+    CLOUD_STATE=CLOUD_STATE||'讀取中'; setNote();
+    var slow=setTimeout(function(){ if(CLOUD_STATE==='讀取中'){ CLOUD_STATE='雲端回應較慢，仍在等待'; setNote(); } },8000);
     fetch(CLOUD+'?action=idcards',{method:'GET',mode:'cors'}).then(function(r){return r.json();}).then(function(o){
-      if(o&&o.ok&&o.rows) o.rows.forEach(function(r){
-        if(!r.id||r.h==null||isNaN(r.h)) return;
-        var base=WS_DATA[r.id]||null;
-        WS_DATA[r.id]={h:+r.h,_lazy:true,_base:base};          // 雲端優先（是最新一次記錄），內建當備援
-        if(r.major) SIZES[r.id]=[+r.major, r.minor?+r.minor:+r.major*0.85];
-        CLOUDN++;
-      });
-      if(!done){done=true;clearTimeout(t);cb();}
-    }).catch(function(){ if(!done){done=true;clearTimeout(t);cb();} });
+      clearTimeout(slow);
+      if(o&&o.ok&&o.rows){ applyRows(o.rows); try{ localStorage.setItem('tx_idc_rows',JSON.stringify({t:Date.now(),rows:o.rows})); }catch(e){} CLOUD_STATE='已更新'; cb(); }
+      else { CLOUD_STATE='雲端回傳異常'; setNote(); }
+    }).catch(function(){ clearTimeout(slow); CLOUD_STATE=(CLOUD_STATE==='快取')?'快取（雲端連不上）':'雲端連不上'; setNote(); });
   }
+  function setNote(){ var el=$('dbNote'); if(!el) return;
+    el.textContent='目前共 '+N+' 片木片'+(CLOUD?('（工作坊登記 '+CLOUDN+' 片'+(CLOUD_STATE?'．'+CLOUD_STATE:'')+'）'):''); }
   function ensureData(id,cb){
     var d=WS_DATA[id]; if(!d){cb(false);return;}
     if(!d._lazy){cb(true);return;}
@@ -331,7 +345,7 @@
     d._p=[cb];
     function finish(ok){ var q=d._p; delete d._p; q.forEach(function(f){f(ok);}); }
     fetch(CLOUD+'?action=idcard&id='+encodeURIComponent(id),{method:'GET',mode:'cors'}).then(function(r){return r.json();}).then(function(o){
-      if(o&&o.ok&&o.found&&o.data&&o.data.polar){ var nd=o.data; nd.h=d.h; WS_DATA[id]=nd; finish(true); }
+      if(o&&o.ok&&o.found&&o.data&&o.data.polar){ var nd=o.data; nd.h=d.h; nd._cloud=true; WS_DATA[id]=nd; finish(true); }
       else if(d._base){ d._base.h=d.h; WS_DATA[id]=d._base; finish(true); }
       else finish(false);
     }).catch(function(){ if(d._base){ d._base.h=d.h; WS_DATA[id]=d._base; finish(true); } else finish(false); });
@@ -633,7 +647,7 @@
       });
       div.appendChild(g);wrap.appendChild(div);
     });
-    $('dbNote').textContent='目前共 '+N+' 片木片'+(CLOUD?('（工作坊登記 '+CLOUDN+' 片，會隨登記自動增加）'):'');
+    setNote();
   }
   rebuildRank(); buildGrid();                       // 先用內建資料開頁（不等網路）
   loadCloud(function(){ rebuildRank(); buildGrid(); });   // 雲端索引回來就重排、補上新登記的片
