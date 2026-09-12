@@ -59,6 +59,26 @@
   .card p{color:var(--ink2);font-size:14.5px;line-height:1.95;margin:8px 0 0}
   .card p b{color:var(--ink)}
 
+  /* ── 表單（登記木片串／回饋） ── */
+  .fld{margin:14px 0}
+  .fld label{display:block;font-size:13px;color:var(--ink2);margin-bottom:6px;letter-spacing:.03em}
+  .fld input,.fld textarea{width:100%;box-sizing:border-box;background:var(--bg2);border:1px solid var(--line);color:var(--ink);
+    font-size:16px;border-radius:12px;padding:12px 14px;outline:none;font-family:inherit}
+  .fld input:focus,.fld textarea:focus{border-color:var(--gold)}
+  .fld textarea{min-height:96px;line-height:1.7;resize:vertical}
+  .opts{display:flex;flex-wrap:wrap;gap:8px}
+  .opts button{background:var(--bg2);border:1px solid var(--line);color:var(--ink2);border-radius:20px;padding:9px 14px;
+    font-size:14px;cursor:pointer;font-family:inherit}
+  .opts button.on{background:var(--gold);border-color:var(--gold);color:#241c08;font-weight:700}
+  .opts.scale button{min-width:44px;text-align:center;padding:9px 0;flex:1}
+  .fmsg{text-align:center;font-size:13.5px;color:var(--ink3);margin-top:10px;min-height:20px;line-height:1.7}
+  .fmsg.ok{color:#9fc98a}.fmsg.bad{color:#d98a7a}
+  .orderList{display:flex;flex-direction:column;gap:6px;margin:6px 0 4px}
+  .orderList .oi{display:flex;align-items:center;gap:10px;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:8px 10px}
+  .orderList .oi b{flex:1;font-size:17px;letter-spacing:.05em}
+  .orderList .oi button{width:34px;height:34px;border-radius:10px;background:var(--card);border:1px solid var(--line);color:var(--ink2);cursor:pointer;font-size:15px}
+  .orderList .oi .no{color:var(--ink3);font-size:12px;width:34px}
+
   /* 相對年齡 spectrum */
   .spec{position:relative;height:14px;border-radius:8px;margin:20px 2px 8px;
     background:linear-gradient(90deg,#5c7878,#8a8a6a,#d9b25e)}
@@ -144,6 +164,7 @@
     </div>
     <div class="hint" id="hint">或直接點下面的木片</div>
     <button class="planEntry" id="toPlanner">拿到好幾片？　規劃我的立柱 ›</button>
+    <button class="planEntry" id="toFeedback" style="margin-top:-14px;border-color:var(--line);color:var(--ink2)">工作坊結束了？　寫一點回饋給我們 ›</button>
     <div id="branches"></div>
     <div class="hint" id="dbNote" style="margin-top:14px"></div>
   </div>
@@ -236,6 +257,46 @@
     <div id="pillar" class="pillar"></div>
     <div id="litStage" class="litStage" hidden></div>
     <div class="cap" id="colCap">點任一片可看它完整的年輪身分證。這是依年紀排好的建議，最後怎麼串，由你決定。</div>
+
+    <div class="card" id="regCard">
+      <h3>登記我的木片串</h3>
+      <p style="margin-top:2px">把你這串木片留下來——編號、順序、還有你畫在木片上的故事。作品點亮的時候，就找得到你的那一段。</p>
+      <div class="fld"><label>你的名字或暱稱</label><input id="rName" maxlength="30" placeholder="例如：阿嬤與小安"></div>
+      <div class="fld"><label>由下往上的順序（用 ↑↓ 調整成你最後決定的串法）</label><div class="orderList" id="rOrder"></div></div>
+      <div class="fld"><label>你畫的是什麼？想對這棵老樟樹說什麼？</label><textarea id="rStory" maxlength="500" placeholder="例如：我畫了家門口的貓，牠每天都坐在樹下…"></textarea></div>
+      <button class="colBtn" id="rSend">送出登記</button>
+      <div class="fmsg" id="rMsg"></div>
+    </div>
+  </div>
+</div>
+
+<div id="feedback">
+  <div class="wrap">
+    <button class="back" id="fBack">‹ 回首頁</button>
+    <div class="idcard">
+      <div class="lbl">工作坊回饋</div>
+      <div class="big" style="font-size:28px">今天玩得怎麼樣？</div>
+      <div class="sub">花一分鐘，讓我們把第二場辦得更好。不用留全名。</div>
+    </div>
+    <div class="card">
+      <div class="fld"><label>名字或暱稱（選填）</label><input id="fName" maxlength="30"></div>
+      <div class="fld"><label>你是</label><div class="opts" id="fWho" data-single>
+        <button data-v="小朋友">小朋友</button><button data-v="爸媽／家長">爸媽／家長</button><button data-v="長輩">長輩</button><button data-v="其他">其他</button></div></div>
+      <div class="fld"><label>整體來說，今天好玩嗎？（1 普通 → 5 很好玩）</label><div class="opts scale" id="fFun" data-single>
+        <button data-v="1">1</button><button data-v="2">2</button><button data-v="3">3</button><button data-v="4">4</button><button data-v="5">5</button></div></div>
+      <div class="fld"><label>最喜歡哪些部分？（可複選）</label><div class="opts" id="fLike">
+        <button data-v="聽老樟樹的故事">聽老樟樹的故事</button><button data-v="看年輪身分證">看年輪身分證</button><button data-v="在木片上畫畫">在木片上畫畫</button>
+        <button data-v="看機器雕刻">看機器雕刻</button><button data-v="串木片">串木片</button><button data-v="和大家一起做">和大家一起做</button></div></div>
+      <div class="fld"><label>難易度</label><div class="opts" id="fHard" data-single>
+        <button data-v="太簡單">太簡單</button><button data-v="剛剛好">剛剛好</button><button data-v="有點難">有點難</button></div></div>
+      <div class="fld"><label>「年輪身分證」看得懂嗎？（1 看不懂 → 5 很清楚）</label><div class="opts scale" id="fGet" data-single>
+        <button data-v="1">1</button><button data-v="2">2</button><button data-v="3">3</button><button data-v="4">4</button><button data-v="5">5</button></div></div>
+      <div class="fld"><label>10/3 第二場（點燈）想來嗎？</label><div class="opts" id="fNext" data-single>
+        <button data-v="想來">想來</button><button data-v="看情況">看情況</button><button data-v="不方便">不方便</button></div></div>
+      <div class="fld"><label>今天最有印象的一件事，或想跟我們說的話</label><textarea id="fSay" maxlength="500"></textarea></div>
+      <button class="colBtn" id="fSend">送出回饋</button>
+      <div class="fmsg" id="fMsg"></div>
+    </div>
   </div>
 </div>
 
@@ -372,7 +433,7 @@
   function branchNo(id){return id.split('-')[0];}
   function partNo(id){return +id.split('-')[1];}
 
-  var SCREENS=['home','detail','planner','column'];
+  var SCREENS=['home','detail','planner','column','feedback'];
   function screen(name){ cancelAnimationFrame(raf); SCREENS.forEach(function(s){$(s).style.display=(s===name?'block':'none');}); window.scrollTo(0,0); }
   var detailFrom='home';
   function show(id,from){
@@ -442,8 +503,64 @@
     $('colTitle').textContent=myList.length+' 片 · 一根時間的柱子';
     $('colSub').innerHTML='最年長的是 <b>'+oldest+'</b>，最年輕的是 <b>'+youngest+'</b>。下面由上到下＝'+(flip?'年輕→年長':'年長→年輕')+'。';
     if(colMode==='lit') renderLit(arr); else renderMandalaCol(arr);
+    if(!regOrder.length || regOrder.slice().sort().join()!==myList.slice().sort().join()) regOrder=arr.slice().reverse();  // 由下往上＝顯示順序反過來
+    renderOrder();
     screen('column');
   }
+  // ── 登記木片串（順序＋故事 → 雲端 Sheet「學員木片串」）──
+  var regOrder=[];
+  function renderOrder(){
+    var box=$('rOrder'); if(!box)return; box.innerHTML='';
+    regOrder.forEach(function(id,i){
+      var d=document.createElement('div'); d.className='oi';
+      d.innerHTML='<span class="no">'+(i===0?'最下':(i===regOrder.length-1?'最上':'第 '+(i+1)))+'</span><b>'+id+'</b>'
+        +'<button data-i="'+i+'" data-d="-1" title="往下">↓</button><button data-i="'+i+'" data-d="1" title="往上">↑</button>';
+      box.appendChild(d);
+    });
+  }
+  $('rOrder').addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
+    var i=+b.dataset.i, j=i+(+b.dataset.d); if(j<0||j>=regOrder.length)return;
+    var t=regOrder[i]; regOrder[i]=regOrder[j]; regOrder[j]=t; renderOrder(); });
+  function postCloud(payload,cb){
+    if(!CLOUD){cb({ok:false,error:'沒有雲端網址'});return;}
+    var body=JSON.stringify(payload);
+    fetch(CLOUD,{method:'POST',mode:'cors',headers:{'Content-Type':'text/plain;charset=utf-8'},body:body})
+      .then(function(r){return r.text();}).then(function(t){var o;try{o=JSON.parse(t);}catch(e){o={ok:true,unverified:true};}cb(o);})
+      .catch(function(){ fetch(CLOUD,{method:'POST',mode:'no-cors',body:body}).then(function(){cb({ok:true,unverified:true});}).catch(function(e){cb({ok:false,error:e.message});}); });
+  }
+  $('rSend').onclick=function(){
+    var name=$('rName').value.trim(), story=$('rStory').value.trim(), m=$('rMsg');
+    if(!name){ m.className='fmsg bad'; m.textContent='請先寫名字或暱稱，作品點亮時才找得到你。'; $('rName').focus(); return; }
+    if(!regOrder.length){ m.className='fmsg bad'; m.textContent='還沒有木片。'; return; }
+    m.className='fmsg'; m.textContent='送出中…'; $('rSend').disabled=true;
+    postCloud({action:'register',data:{name:name,ids:regOrder.join(' '),count:regOrder.length,story:story,
+      heart:regOrder.map(function(id){return WS_DATA[id]?Math.round(WS_DATA[id].h*100)+'%':'';}).join(' '),source:'idcard'}},function(r){
+      $('rSend').disabled=false;
+      if(r&&r.ok){ m.className='fmsg ok'; m.textContent='登記好了，謝謝 '+name+'。這串木片會記在你的名字下。'; }
+      else { m.className='fmsg bad'; m.textContent='送出失敗：'+(r&&r.error||'網路問題')+'，請再按一次或找工作人員。'; }
+    });
+  };
+  // ── 回饋表單 → 雲端 Sheet「工作坊回饋」──
+  document.querySelectorAll('.opts').forEach(function(g){
+    g.addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
+      if(g.hasAttribute('data-single')){ [].forEach.call(g.children,function(c){c.classList.remove('on');}); b.classList.add('on'); }
+      else b.classList.toggle('on'); });
+  });
+  function picked(id){ return [].map.call(document.querySelectorAll('#'+id+' button.on'),function(b){return b.dataset.v;}); }
+  $('fSend').onclick=function(){
+    var m=$('fMsg'), fun=picked('fFun')[0]||'';
+    if(!fun){ m.className='fmsg bad'; m.textContent='至少點一下「好玩嗎」的分數。'; return; }
+    var data={name:$('fName').value.trim(),who:picked('fWho')[0]||'',fun:fun,like:picked('fLike').join('、'),hard:picked('fHard')[0]||'',
+      understand:picked('fGet')[0]||'',next:picked('fNext')[0]||'',say:$('fSay').value.trim(),session:'第一場 2026-09-12'};
+    m.className='fmsg'; m.textContent='送出中…'; $('fSend').disabled=true;
+    postCloud({action:'feedback',data:data},function(r){
+      $('fSend').disabled=false;
+      if(r&&r.ok){ m.className='fmsg ok'; m.textContent='收到了，謝謝你！10/3 點燈見。'; $('fSend').textContent='已送出'; }
+      else { m.className='fmsg bad'; m.textContent='送出失敗：'+(r&&r.error||'網路問題')+'，請再試一次。'; }
+    });
+  };
+  $('toFeedback').onclick=function(){ screen('feedback'); };
+  $('fBack').onclick=function(){ screen('home'); };
   function renderMandalaCol(arr){
     $('pillar').hidden=false; $('litStage').hidden=true;
     $('colCap').textContent='點任一片可看它完整的年輪身分證。這是依年紀排好的建議，最後怎麼串，由你決定。';
